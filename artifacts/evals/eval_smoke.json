@@ -1,0 +1,72 @@
+[
+ {
+  "ckpt": "E:/DevForge/eval_it450.pt",
+  "tag": "gauntlet0",
+  "map": "gauntlet_0_5000.wad:MAP01",
+  "exit": false,
+  "dead": true,
+  "kills": 0,
+  "keys": 0.0,
+  "cells": 12,
+  "health": -8.0,
+  "tic": 477,
+  "steps": 119,
+  "secs": 2.8
+ },
+ {
+  "ckpt": "E:/DevForge/eval_it450.pt",
+  "tag": "tiny0",
+  "map": "tiny_0_5000.wad:MAP01",
+  "exit": true,
+  "dead": false,
+  "kills": 0,
+  "keys": 0.0,
+  "cells": 27,
+  "health": 100.0,
+  "tic": 0,
+  "steps": 261,
+  "secs": 5.2
+ },
+ {
+  "ckpt": "E:/DevForge/eval_it450.pt",
+  "tag": "arena0",
+  "map": "arena_0_5000.wad:MAP01",
+  "exit": false,
+  "dead": true,
+  "kills": 0,
+  "keys": 0.0,
+  "cells": 31,
+  "health": -5.0,
+  "tic": 1638,
+  "steps": 410,
+  "secs": 7.7
+ },
+ {
+  "ckpt": "E:/DevForge/eval_it450.pt",
+  "tag": "multi0",
+  "map": "multi_0_5000.wad:MAP01",
+  "exit": false,
+  "dead": false,
+  "kills": 0,
+  "keys": 0.0,
+  "cells": 32,
+  "health": 100.0,
+  "tic": 3151,
+  "steps": 788,
+  "secs": 14.7
+ },
+ {
+  "ckpt": "E:/DevForge/eval_it450.pt",
+  "tag": "key0",
+  "map": "key_0_5000.wad:MAP01",
+  "exit": false,
+  "dead": false,
+  "kills": 0,
+  "keys": 0.0,
+  "cells": 22,
+  "health": 100.0,
+  "tic": 4201,
+  "steps": 1050,
+  "secs": 20.5
+ }
+]

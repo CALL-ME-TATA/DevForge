@@ -1,0 +1,88 @@
+92 held-out maps x 3 checkpoints = 276 episodes, 6 workers
+  10/276 episodes (12s)
+  20/276 episodes (16s)
+  30/276 episodes (21s)
+  40/276 episodes (31s)
+  50/276 episodes (50s)
+  60/276 episodes (68s)
+  70/276 episodes (93s)
+  80/276 episodes (107s)
+  90/276 episodes (121s)
+  100/276 episodes (129s)
+  110/276 episodes (135s)
+  120/276 episodes (140s)
+  130/276 episodes (145s)
+  140/276 episodes (160s)
+  150/276 episodes (180s)
+  160/276 episodes (198s)
+  170/276 episodes (242s)
+  180/276 episodes (272s)
+  190/276 episodes (282s)
+  200/276 episodes (297s)
+  210/276 episodes (313s)
+  220/276 episodes (318s)
+  230/276 episodes (357s)
+  240/276 episodes (388s)
+  250/276 episodes (414s)
+  260/276 episodes (431s)
+  270/276 episodes (453s)
+
+== ../eval_latest.pt   (92 episodes)
+map type    exit%   keys  kills  cells  died%
+arena0       100%   0.00    0.3     28     0%
+arena2        50%   0.00    0.7     23    50%
+arena4        33%   0.00    1.2     18    67%
+freedoom       0%   0.00    2.5     66    50%
+gauntlet0      0%   0.67    0.5     37    83%
+gauntlet2      0%   0.17    0.3     35   100%
+gauntlet4      0%   0.00    0.0     39    67%
+key0          67%   0.83    0.0     49     0%
+key2           0%   0.17    0.0     58    33%
+key4           0%   0.17    0.0     45    33%
+multi0        67%   0.00    0.0     47     0%
+multi2         0%   0.00    0.2     63    50%
+multi4         0%   0.00    0.0     61    33%
+tiny0         83%   0.00    0.0     12     0%
+tiny2        100%   0.00    0.0     21     0%
+tiny4        100%   0.00    0.0     16     0%
+OVERALL       39%   0.13    0.3     38    35%
+
+== ../eval_it1500.pt   (92 episodes)
+map type    exit%   keys  kills  cells  died%
+arena0       100%   0.00    0.2     24     0%
+arena2        50%   0.00    0.3     20    50%
+arena4        50%   0.00    0.8     23    50%
+freedoom       0%   0.00    2.5     77   100%
+gauntlet0     17%   0.67    0.7     35    83%
+gauntlet2      0%   0.17    1.2     54   100%
+gauntlet4      0%   0.00    0.3     30   100%
+key0          67%   1.00    0.0     49     0%
+key2           0%   0.00    0.3     67    67%
+key4           0%   0.00    0.0     62    83%
+multi0       100%   0.00    0.0     39     0%
+multi2         0%   0.00    0.0     66    67%
+multi4         0%   0.00    0.0     59    50%
+tiny0        100%   0.00    0.0     14     0%
+tiny2        100%   0.00    0.0     14     0%
+tiny4         83%   0.00    0.0     20     0%
+OVERALL       43%   0.12    0.3     39    45%
+
+== ../eval_it450.pt   (92 episodes)
+map type    exit%   keys  kills  cells  died%
+arena0         0%   0.00    0.2     29    83%
+arena2        33%   0.00    0.5     14    67%
+arena4        17%   0.00    1.3     11    83%
+freedoom       0%   0.00    3.5     68   100%
+gauntlet0      0%   0.17    0.3     22    83%
+gauntlet2      0%   0.17    0.3     26    50%
+gauntlet4      0%   0.00    0.2     25    50%
+key0           0%   0.67    0.0     35     0%
+key2           0%   0.00    0.2     33     0%
+key4           0%   0.00    0.0     33    17%
+multi0        17%   0.00    0.0     29     0%
+multi2         0%   0.00    0.0     32    33%
+multi4         0%   0.00    0.0     35     0%
+tiny0         50%   0.00    0.0     18     0%
+tiny2         50%   0.00    0.0     22     0%
+tiny4         33%   0.00    0.0     12     0%
+OVERALL       13%   0.07    0.3     26    33%

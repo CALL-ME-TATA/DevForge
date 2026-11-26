@@ -75,7 +75,7 @@ DEFAULT_CFG = dict(maps_per_bin=40, dmg_pen=0.01, death_pen=3.0, cell_rew=0.01,
                    shape_k=0.0, hard_floor=0.05, key_gate=0.5, weapon_pen=0.0, shot_pen=0.0, door_use=0.0,
                    rev_p=0.0, assist=0.0, assist_until=0.6, edge_p=0.0, edge_every=32, edge_dir="",
                    back_pen=0.0, turn_pen=0.0, use_bounce=0.02, hit_rew=0.0, aim_k=0.0, mask_back=0,
-                   dagger=0, dagger_beta=0.0)
+                   dagger=0, dagger_beta=0.0, dagger_fade=0.5)
 
 KEY_IDX = {"B": 0, "Y": 1, "R": 2}  # lock colour -> doom_env KEY_NAMES index (Blue/Yellow/Red card)
 KEY_THING_COLOUR = {13: "R", 5: "B", 6: "Y"}  # mapgen KEY_THING inverse
@@ -555,7 +555,8 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
             tidx, tvalid = S["teacher"].act(obs_prev, S["ps"])
             if tvalid:
                 lab[:6], lab[6] = tidx, 1
-                beta = cfg["dagger_beta"] * max(0.0, 1.0 - prog[0] / 0.5)  # mixing fades out by mid-run
+                fade = cfg["dagger_fade"]  # fraction of the run over which mixing fades to 0 (0 = constant)
+                beta = cfg["dagger_beta"] * (max(0.0, 1.0 - prog[0] / fade) if fade > 0 else 1.0)
                 if beta > 0 and rng.random() < beta:
                     a = idx_to_buttons(tidx)  # execute the teacher's action (DAgger beta-mixture)
         if cfg["mask_back"]:  # same observation-based action mask as submission/agent.py
@@ -894,6 +895,8 @@ def main():
                     help="DAgger / learning-by-cheating: weight of the cross-entropy loss toward the privileged "
                          "teacher's action (training/teacher.py); 0 = off")
     ap.add_argument("--ppo-w", type=float, default=1.0, help="weight of the PPO policy+value+entropy terms (0 = pure imitation)")
+    ap.add_argument("--dagger-fade", type=float, default=0.5,
+                    help="fraction of the run over which --dagger-beta fades to 0; 0 = keep it constant")
     ap.add_argument("--dagger-beta", type=float, default=0.0,
                     help="probability of executing the teacher's action instead of the student's (fades to 0 by mid-run)")
     ap.add_argument("--mask-back", type=int, default=DEFAULT_CFG["mask_back"],
@@ -939,7 +942,7 @@ def main():
                edge_p=args.edge_p, edge_every=args.edge_every, edge_dir=str(Path(args.out) / "edge_cases"),
                back_pen=args.back_pen, turn_pen=args.turn_pen, use_bounce=args.use_bounce,
                hit_rew=args.hit_rew, aim_k=args.aim_k, mask_back=args.mask_back,
-               dagger=int(args.bc_w > 0), dagger_beta=args.dagger_beta)
+               dagger=int(args.bc_w > 0), dagger_beta=args.dagger_beta, dagger_fade=args.dagger_fade)
     print(f"config {cfg}", flush=True)
     if not Path(args.maps, f"gauntlet_4_{args.maps_per_bin - 1}.wad").exists():
         print("generating maps ...", flush=True)
