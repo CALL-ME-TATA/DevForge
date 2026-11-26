@@ -19,6 +19,15 @@ torch.backends.mha.set_fastpath_enabled(False)  # fast path is slower for 33 tok
 N_LEARNED = 8
 HEADS = (3, 3, 3, 2, 2, 2)  # move F/B/-, strafe L/R/-, turn L/R/-, attack, use, next weapon
 N_AUX = 6 + 1  # d(health, kills, keys) at +8 and +32 steps; visited-before
+# Second aux head (training-only targets from privileged state; Arnold's game-feature heads / DFP style):
+# corridor distance to the current goal (1), direction of the shortest path relative to heading (8 bins),
+# "exit reached within the next 64 steps" (1). Only trains the shared trunk; never used to act.
+N_DIR = 8
+N_AUX2 = 1 + N_DIR + 1
+# Asymmetric critic (Pinto et al. 2018): during TRAINING the value head also reads privileged ground
+# truth (distance to goal, goal kind, keys, health, time). The actor never sees it, and at evaluation
+# o has no "priv" key, so the value head gets zeros (its output is not used to act).
+PRIV_DIM = 8
 
 
 def heads_to_buttons(idx: torch.Tensor) -> torch.Tensor:
@@ -53,8 +62,10 @@ class Net(nn.Module):
         self.fuse = nn.Sequential(nn.Linear(256 + 128 + 64 + 256, hid), nn.ReLU())
         self.gru = nn.GRUCell(hid, hid)
         self.pi = nn.Linear(hid, sum(HEADS))
-        self.v = nn.Linear(hid, 1)
+        self.vpriv = nn.Sequential(nn.Linear(PRIV_DIM, 64), nn.ReLU())
+        self.v = nn.Linear(hid + 64, 1)
         self.aux = nn.Linear(hid, N_AUX)
+        self.aux2 = nn.Linear(hid, N_AUX2)
         self.write = nn.Linear(hid, N_LEARNED + 1)
         nn.init.orthogonal_(self.pi.weight, 0.01)
         nn.init.zeros_(self.pi.bias)
@@ -92,7 +103,34 @@ class Net(nn.Module):
         old = torch.gather(L, 2, pos).squeeze(-1)
         new = (1 - g) * old + g * torch.tanh(w[:, 1:])
         L = L.scatter(2, pos, new.unsqueeze(-1))
-        return self.pi(h), self.v(h).squeeze(-1), self.aux(h), (h, L)
+        pv = self.vpriv(o["priv"]) if "priv" in o else h.new_zeros(B, 64)
+        v = self.v(torch.cat([h, pv], -1)).squeeze(-1)
+        return self.pi(h), v, torch.cat([self.aux(h), self.aux2(h)], -1), (h, L)
+
+
+def load_compat(net: nn.Module, sd: dict) -> list[str]:
+    """Load weights saved before/after the privileged-critic change. The old value head (1, hid) is
+    copied into the first hid columns of the new one; missing new layers keep their init.
+    Returns the names of tensors that were not loaded as-is."""
+    own = net.state_dict()
+    out, changed = {}, []
+    for k, t in own.items():
+        s = sd.get(k)
+        if s is None:
+            changed.append(k)
+            out[k] = t
+        elif s.shape == t.shape:
+            out[k] = s
+        elif k == "v.weight" and s.shape[0] == t.shape[0] and s.shape[1] < t.shape[1]:
+            w = torch.zeros_like(t)
+            w[:, :s.shape[1]] = s
+            out[k] = w
+            changed.append(k)
+        else:
+            changed.append(k)
+            out[k] = t
+    net.load_state_dict(out)
+    return changed
 
 
 def split_logits(logits: torch.Tensor):

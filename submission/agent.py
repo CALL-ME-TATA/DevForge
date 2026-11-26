@@ -8,7 +8,7 @@ import torch
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 from features import Features  # noqa: E402
-from model import Net, heads_to_buttons, sample  # noqa: E402
+from model import Net, heads_to_buttons, load_compat, sample  # noqa: E402
 
 KEYS_LONG = ("etype", "crop_idx", "pos_idx")
 
@@ -20,7 +20,7 @@ class DoomAgent:
         self.net = Net().to(self.dev).eval()
         w = HERE / "weights" / "model.pt"
         if w.exists():
-            self.net.load_state_dict(torch.load(w, map_location=self.dev)["model"])
+            load_compat(self.net, torch.load(w, map_location=self.dev)["model"])
         self.feat = Features()
         # warm-up (first torch call is slow; __init__ has 60 s, first act() only 10 s)
         self.reset()

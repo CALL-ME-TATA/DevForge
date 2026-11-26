@@ -24,11 +24,14 @@ FAMILY_TICKS = {"tiny": 1050, "arena": 2100, "multi": 3150, "key": 4200, "gauntl
 LEVELS = 5
 
 
-def build_eval_maps(out_dir: Path, per_bin: int, levels: list[int], start: int = 5000) -> list[tuple[str, str, str, int]]:
+def build_eval_maps(out_dir: Path, per_bin: int, levels: list[int], start: int = 5000,
+                    families=None) -> list[tuple[str, str, str, int]]:
     from mapgen import FAMILIES, generate, write_map
     out_dir.mkdir(parents=True, exist_ok=True)
     maps = []
     for fi, fam in enumerate(FAMILIES):
+        if families and fam not in families:
+            continue
         for li in levels:
             d = li / (LEVELS - 1)
             for i in range(start, start + per_bin):
@@ -56,7 +59,8 @@ def run_one(job):
 
     env = make_env(wad, mapname, episode_ticks=ticks)
     agent = DoomAgent(env.observation_space, env.action_space, "cpu")
-    agent.net.load_state_dict(torch.load(ckpt, map_location="cpu")["model"])
+    from model import load_compat
+    load_compat(agent.net, torch.load(ckpt, map_location="cpu")["model"])
     # diagnostics (generated maps only): rebuild the layout to measure distance-to-goal over time
     shaper = None
     if wad.endswith(".wad") and "maps_eval" in wad.replace("\\", "/"):
@@ -127,9 +131,11 @@ def main():
     ap.add_argument("--greedy", action="store_true", help="argmax actions instead of sampling")
     ap.add_argument("--maps-dir", default=str(ROOT / "training" / "maps_eval"))
     ap.add_argument("--out", default=str(ROOT / "training" / "eval_results.json"))
+    ap.add_argument("--families", nargs="+", default=None,
+                    help="only these generator families (e.g. --families gauntlet for a Tier-4-only eval)")
     args = ap.parse_args()
 
-    maps = build_eval_maps(Path(args.maps_dir), args.per_bin, args.levels, args.seed_start)
+    maps = build_eval_maps(Path(args.maps_dir), args.per_bin, args.levels, args.seed_start, args.families)
     if args.freedoom:
         from doom_env.wrapper import IWAD
         maps += [("freedoom", IWAD, f"MAP{i:02d}", FAMILY_TICKS["freedoom"]) for i in range(1, args.freedoom + 1)]

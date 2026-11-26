@@ -107,6 +107,32 @@ died early 23, stalled at a door 14, reached the goal cell without finishing 5. 
 - **Greedy vs sampled actions.** Argmax actions cleared 6/50 maps vs 13/50 sampled (stuck against
   walls), so the agent keeps sampling.
 
+### Automatic edge-case mining during training (`--edge-p`)
+
+The edge cases above were found by hand between runs. With `--edge-p > 0` the engine now finds them
+inside every iteration and feeds them straight back into PPO (prioritized replay of hard *states*,
+PLR / Go-Explore style):
+
+1. **Snapshot.** Every `--edge-every` steps (default 32) each worker saves the full ViZDoom game state
+   (`DoomGame.save`: monsters, health, ammo, doors, clock). All workers save on the same lockstep step, so
+   the ~30 ms save stalls the batch once, not 40 times.
+2. **Mine.** When an episode fails, `pick_case` classifies it, using the same taxonomy as `edge_cases.py`:
+   `death`, `stuck` (≥120 steps inside one cell), `door` / `locked` (closest approach to the goal next to a
+   door), `goal_cell` (reached the exit cell, never finished), or `plateau` (got closer, then ≥150 steps
+   with no progress). The snapshot from just before the failure is kept: ≥40 steps before a death, at the
+   start of a stall, or at the closest approach.
+3. **Bank.** The learner's `EdgeBank` (cap `--edge-cap`, saved in checkpoints) samples cases by priority:
+   unseen cases first, then the ones that still fail. A case is **retired as learned** after 3 solves in
+   a row and **dropped as hopeless** after 8 straight failures.
+4. **Replay.** A fraction `--edge-p` of new episodes load a case's exact state and play on from there (late
+   failures get at least half an episode of clock). A death case counts as solved if the agent gets out
+   alive, every other kind only by reaching the exit. Replays move neither curriculum and are left out of
+   the per-level exit rates in the log.
+
+The log line gets `| edge bank N +mined replays R solved S retired L/H`, and
+`training/ckpt/edge_report.json` breaks down mined / open cases by kind and level. Engine snapshots and
+reward bookkeeping are training-time scaffolding only; the agent observes nothing new.
+
 ### Training timeline (one RTX 4050 laptop, Docker/Linux, ~1,000 env steps/s)
 
 | Steps | Change |
@@ -146,7 +172,8 @@ docker build -t doom-train -f training/Dockerfile training
 python training/extend_maps.py --per-bin 500           # grow the map pool (seconds)
 python training/train.py --envs 40 --hours 8 --resume \
   --maps-per-bin 500 --dmg-pen 0.03 --death-pen 5 --cell-rew 0.02 \
-  --shape-k 0.1 --hard-floor 0.2 --key-gate 0.3 --weapon-pen 0.05 --shot-pen 0.005 --door-use 0.1
+  --shape-k 0.1 --hard-floor 0.2 --key-gate 0.3 --weapon-pen 0.05 --shot-pen 0.005 --door-use 0.1 \
+  --edge-p 0.2   # mine failure snapshots from the engine and replay them
 # Windows host: powershell -File training\start_training.ps1 -Hours 8 -Extra "<flags above>"
 
 python training/evaluate.py --ckpts training/ckpt/latest.pt --per-bin 6 --levels 0 2 4 --freedoom 2

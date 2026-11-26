@@ -82,7 +82,11 @@ class Features:
         fy = self.y + dy[:, None] * _SAMPLES[None, :]
         fidx = self._cell(fx[free], fy[free])
         M[0, fidx] = 1
-        M[1:4, fidx] = 0
+        M[1:3, fidx] = 0
+        # locked-door marks are long-horizon landmarks: only erase them from close range, so heading
+        # drift on far rays cannot wipe a remembered locked door
+        near = free & (_SAMPLES[None, :] < 192)
+        M[3, self._cell(fx[near], fy[near])] = 0
         hit = ht > 0
         hidx = self._cell(self.x + dx[hit] * (dist[hit] + 8), self.y + dy[hit] * (dist[hit] + 8))
         chan = np.array([0, 1, 2, 3, 6, 5])[ht[hit]]
