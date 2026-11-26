@@ -41,6 +41,7 @@ TURN_START, TURN_STOP = 9.0, 0.0  # = plain 9 deg deadband (hysteresis 15/5 cost
 # Aiming: one TURN press rotates ~7 deg, so a ~1.5 deg deadband jittered left/right on every step an enemy
 # was in view (38% of all steps). Doom's pistol/chaingun spread is ~+-5.6 deg anyway.
 AIM_DEADBAND = 6.0
+SIGHT_RAYS, SIGHT_STEPS = 32, 32  # frontier teacher: 32 sight lines x 32 steps of 32 units = 1024 u
 ROTATE_IN_PLACE = 40.0  # heading error above which the teacher stops to turn (90 tested: 74/90 vs 81/90)
 
 
@@ -58,11 +59,16 @@ def idx_to_buttons(idx) -> np.ndarray:
 
 
 class Teacher:
-    def __init__(self, shaper, track_executed: bool = False):
+    def __init__(self, shaper, track_executed: bool = False, explore: bool = False):
         self.sh = shaper  # GoalShaper of this exact map variant (grid, keys, exit)
         # DAgger: the student drives, so the USE cooldown must follow the presses actually executed
         # (note_executed), not the teacher's own labels
         self.track_executed = track_executed
+        # Information-matched teacher (closes the "imitation gap", Weihs et al. 2021; Choudhury et al. 2018):
+        # until the current goal (needed key / exit) has been SEEN, explore like Yamauchi (1997) -- nearest
+        # frontier of the seen area, reached through seen space -- instead of walking straight to a goal the
+        # student cannot know about. Once seen, take the shortest route as before.
+        self.explore = explore
         self.reset()
 
     def note_executed(self, buttons):
@@ -79,6 +85,55 @@ class Teacher:
         self.exec_use_prev = 0
         self.dodge_dir = 1
         self.turn_dir = None  # steering hysteresis state (L / R / None)
+        self.seen = set()  # grid cells the student could have seen this episode
+
+    # ------------------------------------------------------------------ what the student can know
+    def _observe(self, x, y):
+        """Mark cells visible from (x, y): SIGHT_RAYS sight lines up to 1024 units (the student's ray
+        range); walls and doors block the view (the blocking cell itself is seen)."""
+        g = self.sh.g
+        for k in range(SIGHT_RAYS):
+            a = 2.0 * math.pi * k / SIGHT_RAYS
+            dx, dy = math.cos(a), math.sin(a)
+            for s in range(1, SIGHT_STEPS + 1):
+                px, py = x + dx * s * 32.0, y + dy * s * 32.0
+                r, c = math.floor(-py / CELL), math.floor(px / CELL)
+                if not (0 <= r < len(g) and 0 <= c < len(g[r])):
+                    break
+                self.seen.add((r, c))
+                ch = g[r][c]
+                if ch == "#" or ch == "D" or ch in KEY_IDX:
+                    break
+
+    def _goal_known(self, kind, held):
+        if kind == "exit":
+            return any(p in self.seen for p in self.sh.exit)
+        return any(p in self.seen for col, p in self.sh.keys.items() if col not in held)
+
+    def _frontier_path(self, r, c, held, n=6):
+        """Yamauchi (1997): breadth-first search through SEEN passable cells to the nearest unseen
+        passable cell (the frontier). Returns the first n cells of that path, or None."""
+        start, prev, q, i = (r, c), {(r, c): None}, [(r, c)], 0
+        target = None
+        while i < len(q):
+            cur = q[i]
+            i += 1
+            if cur != start and cur not in self.seen:
+                target = cur
+                break
+            y, x = cur
+            for nb in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
+                if nb not in prev and self._free(*nb, held):
+                    prev[nb] = cur
+                    q.append(nb)
+        if target is None:
+            return None
+        path, node = [], target
+        while node != start:
+            path.append(node)
+            node = prev[node]
+        path.reverse()
+        return path[:n]
 
     def _press_use(self):
         if self.track_executed:
@@ -150,6 +205,12 @@ class Teacher:
 
         path, kind, dist = self._path(r, c, held)
         valid = path is not None
+        if self.explore:
+            self._observe(x, y)
+            if path is not None and not self._goal_known(kind, held):
+                fp = self._frontier_path(r, c, held)
+                if fp:  # goal not seen yet: go to the nearest frontier instead
+                    path, kind, dist = fp, "explore", None
 
         # ---- navigation target: farthest path cell in line of sight
         nav_err, target_cell = None, None

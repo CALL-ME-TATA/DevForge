@@ -78,7 +78,7 @@ DEFAULT_CFG = dict(maps_per_bin=40, dmg_pen=0.01, death_pen=3.0, cell_rew=0.01,
                    rev_p=0.0, assist=0.0, assist_until=0.6, edge_p=0.0, edge_every=32, edge_dir="",
                    back_pen=0.0, turn_pen=0.002, use_bounce=0.12, hit_rew=0.1, aim_k=0.0, mask_back=1,
                    dagger=0, dagger_beta=0.0, dagger_fade=0.5,
-                   key_rew=3.5, stall_pen=0.01, stall_after=48)
+                   key_rew=3.5, stall_pen=0.01, stall_after=48, teacher_explore=0)
 
 KEY_IDX = {"B": 0, "Y": 1, "R": 2}  # lock colour -> doom_env KEY_NAMES index (Blue/Yellow/Red card)
 KEY_THING_COLOUR = {13: "R", 5: "B", 6: "Y"}  # mapgen KEY_THING inverse
@@ -499,7 +499,8 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
                  shaped=0.0, obs=obs, terms=defaultdict(float), trace=[], snaps=[],
                  hits=env._game.get_game_variable(vd.GameVariable.HITCOUNT))
         # DAgger teacher for this episode (generated maps only; Freedoom has no layout -> no labels)
-        S["teacher"] = Teacher(S["shaper"], track_executed=True) if cfg["dagger"] and S.get("shaper") is not None else None
+        S["teacher"] = Teacher(S["shaper"], track_executed=True, explore=bool(cfg["teacher_explore"])) \
+            if cfg["dagger"] and S.get("shaper") is not None else None
         S["last_prog"] = 0
         f["priv"] = priv_of(ps)
         return f, ps
@@ -907,6 +908,8 @@ def main():
                          "teacher's action (training/teacher.py); 0 = off")
     ap.add_argument("--ppo-w", type=float, default=1.0, help="weight of the PPO policy+value+entropy terms (0 = pure imitation)")
     ap.add_argument("--key-rew", type=float, default=DEFAULT_CFG["key_rew"], help="reward per key picked up")
+    ap.add_argument("--teacher-explore", type=int, default=DEFAULT_CFG["teacher_explore"],
+                    help="1 = information-matched teacher: frontier exploration until the goal has been seen")
     ap.add_argument("--stall-pen", type=float, default=DEFAULT_CFG["stall_pen"],
                     help="per-step penalty after --stall-after steps without a new cell/key/door/kill")
     ap.add_argument("--stall-after", type=int, default=DEFAULT_CFG["stall_after"])
@@ -960,7 +963,8 @@ def main():
                back_pen=args.back_pen, turn_pen=args.turn_pen, use_bounce=args.use_bounce,
                hit_rew=args.hit_rew, aim_k=args.aim_k, mask_back=args.mask_back,
                dagger=int(args.bc_w > 0), dagger_beta=args.dagger_beta, dagger_fade=args.dagger_fade,
-               key_rew=args.key_rew, stall_pen=args.stall_pen, stall_after=args.stall_after)
+               key_rew=args.key_rew, stall_pen=args.stall_pen, stall_after=args.stall_after,
+               teacher_explore=args.teacher_explore)
     print(f"config {cfg}", flush=True)
     if not Path(args.maps, f"gauntlet_4_{args.maps_per_bin - 1}.wad").exists():
         print("generating maps ...", flush=True)

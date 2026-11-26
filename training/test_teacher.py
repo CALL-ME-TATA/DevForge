@@ -17,7 +17,7 @@ TIER = {"tiny": "T0", "arena": "T1", "multi": "T2", "key": "T3", "gauntlet": "T4
 
 
 def run(job):
-    fam, li, mi = job
+    fam, li, mi, explore = job
     import warnings
     warnings.filterwarnings("ignore")
     from mapgen import FAMILIES, generate
@@ -25,7 +25,7 @@ def run(job):
     from teacher import Teacher, idx_to_buttons
     from doom_env import make_env
     grid, things = generate(fam, li / 4, FAMILIES.index(fam) * 1_000_000 + li * 10_000 + mi)
-    t = Teacher(GoalShaper(grid, things))
+    t = Teacher(GoalShaper(grid, things), explore=explore)
     env = make_env(str(ROOT / "training" / "maps_eval" / f"{fam}_{li}_{mi}.wad"), "MAP01", episode_ticks=TICKS[fam])
     obs, _ = env.reset(seed=12345)
     steps, invalid, back_noenemy, turning, still = 0, 0, 0, 0, 0
@@ -53,8 +53,9 @@ def main():
     ap.add_argument("--levels", type=int, nargs="+", default=[0, 2, 4])
     ap.add_argument("--start", type=int, default=5000)
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--explore", type=int, default=0, help="1 = frontier-exploring teacher")
     args = ap.parse_args()
-    jobs = [(f, li, i) for f in TICKS for li in args.levels for i in range(args.start, args.start + args.per_bin)]
+    jobs = [(f, li, i, bool(args.explore)) for f in TICKS for li in args.levels for i in range(args.start, args.start + args.per_bin)]
     with mp.get_context("spawn").Pool(args.workers) as pool:
         res = list(pool.imap_unordered(run, jobs))
     by = defaultdict(list)
