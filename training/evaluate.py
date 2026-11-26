@@ -57,23 +57,63 @@ def run_one(job):
     env = make_env(wad, mapname, episode_ticks=ticks)
     agent = DoomAgent(env.observation_space, env.action_space, "cpu")
     agent.net.load_state_dict(torch.load(ckpt, map_location="cpu")["model"])
+    # diagnostics (generated maps only): rebuild the layout to measure distance-to-goal over time
+    shaper = None
+    if wad.endswith(".wad") and "maps_eval" in wad.replace("\\", "/"):
+        from mapgen import FAMILIES, generate
+        from train import GoalShaper
+        fam_, li_, mi_ = Path(wad).stem.rsplit("_", 2)
+        grid, things = generate(fam_, int(li_) / (LEVELS - 1), FAMILIES.index(fam_) * 1_000_000 + int(li_) * 10_000 + int(mi_))
+        shaper = GoalShaper(grid, things)
+    KEY_IDX = {"B": 0, "Y": 1, "R": 2}
+
     agent.reset()
     torch.manual_seed(seed)
     obs, _ = env.reset(seed=seed)
     cells, steps, t0 = set(), 0, time.time()
+    trace = []  # (x, y, health, goal-kind, dist)
     while True:
         ps = env.privileged_state()
         cells.add((int(ps["x"] // 64), int(ps["y"] // 64)))
+        gd = None
+        if shaper is not None:
+            held = frozenset(c for c, i in KEY_IDX.items() if ps["keys"][i] > 0)
+            gd = shaper.dist(ps["x"], ps["y"], held)
+        trace.append((ps["x"], ps["y"], ps["health"], gd[0][0] if gd else None, gd[1] if gd else None))
         obs, _, term, trunc, info = env.step(agent.act(obs))
         steps += 1
         if term or trunc:
             break
     ps = env.privileged_state()
     env.close()
+
+    # longest window where the agent moved less than one cell (stuck on a wall / corner / door)
+    longest_still, i0 = 0, 0
+    for j in range(len(trace)):
+        while i0 < j and max(abs(trace[j][0] - trace[i0][0]), abs(trace[j][1] - trace[i0][1])) > 64:
+            i0 += 1
+        longest_still = max(longest_still, j - i0)
+    ds = [t[4] for t in trace if t[4] is not None]
+    diag = dict(start_dist=ds[0] if ds else None, min_dist=min(ds) if ds else None,
+                final_dist=ds[-1] if ds else None, still_steps=longest_still,
+                revisit_ratio=round(steps / max(1, len(cells)), 1),
+                got_key_phase=any(t[3] == "exit" for t in trace) and any(t[3] == "key" for t in trace),
+                blocked_by=None)
+    if shaper is not None and ds:  # what is in the next cell toward the goal at the closest approach?
+        j = min(range(len(trace)), key=lambda k: trace[k][4] if trace[k][4] is not None else 1 << 30)
+        x, y = trace[j][0], trace[j][1]
+        r, c = int(-y // 64), int(x // 64)
+        best = None
+        for nr, nc in ((r + 1, c), (r - 1, c), (r, c + 1), (r, c - 1)):
+            if 0 <= nr < shaper.H and 0 <= nc < len(shaper.g[nr]):
+                ch = shaper.g[nr][nc]
+                if ch in "DRBY":
+                    best = ch
+        diag["blocked_by"] = {"D": "door", "R": "locked", "B": "locked", "Y": "locked"}.get(best)
     return dict(ckpt=ckpt, tag=tag, map=Path(wad).name + ":" + mapname, exit=bool(info["exit_reached"]),
                 dead=bool(ps["dead"]), kills=int(ps["kills"]), keys=float(np.sum(ps["keys"])),
                 cells=len(cells), health=float(ps["health"]), tic=int(ps["tic"]), steps=steps,
-                secs=round(time.time() - t0, 1))
+                death_frac=round(steps / max(1, ticks // 4), 2), secs=round(time.time() - t0, 1), **diag)
 
 
 def main():

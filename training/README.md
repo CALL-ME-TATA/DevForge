@@ -80,6 +80,9 @@ Why it is built this way:
 | Every step | −0.001 | urgency |
 | Re-pressing USE within 8 steps | −0.02 | stop bouncing doors |
 | **Distance shaping** (generated maps only) | +0.1 per cell closer to the current goal, −0.1 per cell farther | long-horizon navigation |
+| Switching away from a loaded weapon | −0.05 (−0.01 per step holding fists while ammo exists) | edge case: fist fighting |
+| Firing with no enemy in view | −0.005 per shot | edge case: wasted ammo |
+| Fresh USE press next to a door (generated maps) | +0.1 | edge case: doors never opened |
 
 **Distance shaping** is potential-based reward shaping (Ng, Harada & Russell 1999), which leaves the
 optimal policy unchanged. Each training map's layout is rebuilt from its generator seed. A BFS over that
@@ -88,6 +91,22 @@ otherwise the nearest key still needed (locked doors are passable only with thei
 Φ(s′) − Φ(s) with Φ = −0.1 × distance, so pacing back and forth earns nothing. **This BFS exists only in
 the training reward;** the agent never sees distances and never runs a search.
 
+### Edge cases found on unseen maps (`evaluate.py` diagnostics, `edge_cases.py`)
+
+At 9.0M steps, failures on 90 unseen maps broke down as: lost / barely closer to the goal 24,
+died early 23, stalled at a door 14, reached the goal cell without finishing 5. Probing behaviour:
+
+- **Fist fighting.** The agent pressed SELECT_NEXT_WEAPON on 43% of steps and held fists for 44% of
+  every arena episode while it still had bullets (switching within the first 1–5 steps). This is
+  the main cause of early combat deaths. Fix: weapon-switch penalty (table above).
+- **Aiming.** Attack rate was the same with or without an enemy in view (37% vs 38%), and it turned
+  away from the nearest enemy as often as toward it. Fix: small penalty for firing at nothing.
+- **Doors.** It spent 0.5% of steps next to a door and pressed USE there 19% of the time, about its
+  14% base rate, so the +1 door-opening reward almost never fired. Fix: distance shaping now leads it
+  to doors, plus a small reward for pressing USE next to one.
+- **Greedy vs sampled actions.** Argmax actions cleared 6/50 maps vs 13/50 sampled (stuck against
+  walls), so the agent keeps sampling.
+
 ### Training timeline (one RTX 4050 laptop, Docker/Linux, ~1,000 env steps/s)
 
 | Steps | Change |
@@ -95,7 +114,8 @@ the training reward;** the agent never sees distances and never runs a search.
 | 0 – 0.6M | Windows, 16 envs, 40 maps per bin |
 | 0.6M – 5.0M | Docker, 40 envs |
 | 5.0M – 8.1M | 200 maps per bin; damage −0.01 → −0.03, death −3 → −5, cell +0.01 → +0.02 |
-| 8.1M – end | 500 maps per bin; distance shaping; curriculum floor for multi/key/gauntlet |
+| 8.1M – 9.5M | 500 maps per bin; distance shaping; curriculum floor for multi/key/gauntlet |
+| 9.5M – end | edge-case fixes: weapon-switch and wasted-shot penalties, door USE reward |
 | last 2 h | fine-tune: lr 1.5e-4, entropy 0.005 |
 
 ## Evaluation on unseen maps (`evaluate.py`, `tier_report.py`)
@@ -126,7 +146,7 @@ docker build -t doom-train -f training/Dockerfile training
 python training/extend_maps.py --per-bin 500           # grow the map pool (seconds)
 python training/train.py --envs 40 --hours 8 --resume \
   --maps-per-bin 500 --dmg-pen 0.03 --death-pen 5 --cell-rew 0.02 \
-  --shape-k 0.1 --hard-floor 0.2 --key-gate 0.3
+  --shape-k 0.1 --hard-floor 0.2 --key-gate 0.3 --weapon-pen 0.05 --shot-pen 0.005 --door-use 0.1
 # Windows host: powershell -File training\start_training.ps1 -Hours 8 -Extra "<flags above>"
 
 python training/evaluate.py --ckpts training/ckpt/latest.pt --per-bin 6 --levels 0 2 4 --freedoom 2

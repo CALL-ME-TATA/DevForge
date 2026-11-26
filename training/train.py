@@ -70,7 +70,7 @@ def cur_to_plain(p):
 
 # reward / map-pool settings (CLI flags in main(); defaults = original behaviour)
 DEFAULT_CFG = dict(maps_per_bin=40, dmg_pen=0.01, death_pen=3.0, cell_rew=0.01,
-                   shape_k=0.0, hard_floor=0.05, key_gate=0.5)
+                   shape_k=0.0, hard_floor=0.05, key_gate=0.5, weapon_pen=0.0, shot_pen=0.0, door_use=0.0)
 
 KEY_IDX = {"B": 0, "Y": 1, "R": 2}  # lock colour -> doom_env KEY_NAMES index (Blue/Yellow/Red card)
 KEY_THING_COLOUR = {13: "R", 5: "B", 6: "Y"}  # mapgen KEY_THING inverse
@@ -177,7 +177,7 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
         f, _ = feat.step(obs, None)
         ps = env.privileged_state()
         S.update(bin=b, ps=ps, visited={(int(ps["x"] // 64), int(ps["y"] // 64))}, opened=set(),
-                 last_use=-99, t=0, ret=0.0, use_prev=0, phi=None, goal=None, shaped=0.0)
+                 last_use=-99, t=0, ret=0.0, use_prev=0, phi=None, goal=None, shaped=0.0, obs=obs)
         return f, ps
 
     f, ps = start()
@@ -190,10 +190,23 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
         if cmd == "close":
             env.close()
             return
+        obs_prev = S["obs"]  # what the agent saw when it chose `a`
         obs, _, term, trunc, info = env.step(a)
+        S["obs"] = obs
         p0, p1 = S["ps"], env.privileged_state()
         S["t"] += 1
         r = -0.001
+        # --- edge-case fixes (training-time reward only; see README "Edge cases") ---
+        vit = obs_prev["vitals"]
+        if cfg["weapon_pen"] > 0:
+            if a[8] and vit[3] > 0:  # switched away from a weapon that still had ammo
+                r -= cfg["weapon_pen"]
+            if vit[3] <= 0 and (vit[4] > 0 or vit[5] > 0):  # holding fists/empty gun while bullets/shells exist
+                r -= 0.2 * cfg["weapon_pen"]
+        if cfg["shot_pen"] > 0 and a[6]:  # firing with no enemy in view wastes ammo
+            ve = obs_prev["visible_entities"]
+            if not np.isin(ve["entity_type"][ve["mask"].astype(bool)], (1, 2, 3)).any():
+                r -= cfg["shot_pen"]
         r += 1.0 * (p1["kills"] - p0["kills"])
         r -= cfg["dmg_pen"] * max(0.0, p1["damage_taken"] - p0["damage_taken"])
         r += 3.0 * float(p1["keys"].sum() - p0["keys"].sum())
@@ -211,6 +224,12 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
         if a[7] and not S["use_prev"]:
             if S["t"] - S["last_use"] < 8:
                 r -= 0.02  # re-pressing USE bounces a moving door
+            elif cfg["door_use"] > 0 and S.get("shaper") is not None:  # fresh USE right next to a door
+                g_ = S["shaper"].g
+                rr, cc = math.floor(-p0["y"] / 64.0), math.floor(p0["x"] / 64.0)
+                if any(0 <= rr + dy < len(g_) and 0 <= cc + dx < len(g_[rr + dy]) and g_[rr + dy][cc + dx] in "DRBY"
+                       for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1))):
+                    r += cfg["door_use"]
             S["last_use"] = S["t"]
         S["use_prev"] = int(a[7])
         done = term or trunc
@@ -383,6 +402,13 @@ def main():
                     help="minimum curriculum weight for unlocked multi/key/gauntlet bins")
     ap.add_argument("--key-gate", type=float, default=DEFAULT_CFG["key_gate"],
                     help="multi0 exit rate needed before key0 unlocks")
+    ap.add_argument("--weapon-pen", type=float, default=DEFAULT_CFG["weapon_pen"],
+                    help="penalty for switching away from a loaded weapon (x0.2 per step holding fists/empty "
+                         "while ammo exists)")
+    ap.add_argument("--shot-pen", type=float, default=DEFAULT_CFG["shot_pen"],
+                    help="penalty per shot fired with no enemy in view")
+    ap.add_argument("--door-use", type=float, default=DEFAULT_CFG["door_use"],
+                    help="reward for a fresh USE press next to a door (generated maps)")
     args = ap.parse_args()
 
     import torch
@@ -392,7 +418,8 @@ def main():
     torch.manual_seed(args.seed)
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg = dict(maps_per_bin=args.maps_per_bin, dmg_pen=args.dmg_pen, death_pen=args.death_pen,
-               cell_rew=args.cell_rew, shape_k=args.shape_k, hard_floor=args.hard_floor, key_gate=args.key_gate)
+               cell_rew=args.cell_rew, shape_k=args.shape_k, hard_floor=args.hard_floor, key_gate=args.key_gate,
+               weapon_pen=args.weapon_pen, shot_pen=args.shot_pen, door_use=args.door_use)
     print(f"config {cfg}", flush=True)
     if not Path(args.maps, f"gauntlet_4_{args.maps_per_bin - 1}.wad").exists():
         print("generating maps ...", flush=True)
