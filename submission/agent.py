@@ -12,7 +12,7 @@ from decision import DecisionEngine  # noqa: E402
 from model import sample  # noqa: E402  (module-level so evaluation tools can swap in greedy sampling)
 
 # Observation-based backward mask (action_mask.py). Must match how the shipped weights were trained:
-# the current weights (it2180, DAgger) were trained and evaluated with it (training --mask-back 1).
+# the current weights (it2734) were trained and evaluated with it (training --mask-back 1).
 MASK_BACKWARD = True
 
 
