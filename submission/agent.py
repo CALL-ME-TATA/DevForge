@@ -7,10 +7,14 @@ import torch
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
+from action_mask import mask_actions  # noqa: E402
 from features import Features  # noqa: E402
 from model import Net, heads_to_buttons, load_compat, sample  # noqa: E402
 
 KEYS_LONG = ("etype", "crop_idx", "pos_idx")
+# Observation-based backward mask (action_mask.py). Must match how the shipped weights were trained:
+# the current weights (it1660) were trained and evaluated without it.
+MASK_BACKWARD = False
 
 
 class DoomAgent:
@@ -40,5 +44,7 @@ class DoomAgent:
         logits, _, _, self.state = self.net.step(o, self.state)
         idx, _, _ = sample(logits)
         a = heads_to_buttons(idx)[0].cpu().numpy().astype(np.int64)
+        if MASK_BACKWARD:
+            a = mask_actions(a, observation)  # observation-based action mask (same as in training)
         self.prev = a
         return a

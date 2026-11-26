@@ -1,6 +1,6 @@
 """Observation encoding shared by training and the submitted agent (numpy only).
 
-- Dead reckoning: heading from our own turn actions (table measured in-engine, residual ~0.7 deg/step),
+- Dead reckoning: heading from our own turn actions (table refit in-engine, residual 0),
   position from the integrated ego velocities in `vitals`. Frame = spawn pose, no privileged data.
 - EgoMap: G x G allocentric grid (64-unit cells) written from rays + visible entities, read as a
   heading-aligned 32 x 32 crop. Writing is deterministic observation encoding; all reading,
@@ -11,17 +11,20 @@ from __future__ import annotations
 import numpy as np
 
 G, CELL, CROP = 128, 64.0, 32
-N_FIXED = 8  # free, wall, door, locked, key, item, enemy, visits
+N_FIXED = 9  # free, wall, door, locked, key, item, enemy, visits, recent (decaying trail)
+RECENT_DECAY = 0.97  # trail half-life ~23 steps
 RAY_RANGE, NUM_RAYS = 1024.0, 64
 KEY_T, ENEMY_T = 9, (1, 2, 3)
 VEC_DIM = 17 + 9 + 40
 VITALS_SCALE = np.array([100, 100, 7, 50, 200, 50, 50, 300, 1, 1, 1, 1, 1, 1, 10, 10, 10], np.float32)
 
 # mean heading change (deg) for (turn[t-2], turn[t-1], turn[t]); turn = left - right
-_TURN = {(-1, -1, -1): -14.06, (-1, -1, 1): 14.06, (-1, 0, -1): -10.55, (-1, 0, 1): 11.13,
-         (-1, 1, -1): -14.06, (-1, 1, 1): 14.06, (0, -1, -1): -12.52, (0, -1, 1): 12.56,
-         (0, 0, -1): -7.4, (0, 0, 1): 7.78, (0, 1, -1): -13.04, (0, 1, 1): 12.58,
-         (1, -1, -1): -14.06, (1, -1, 1): 14.06, (1, 0, -1): -10.04, (1, 0, 1): 10.55,
+# Refit on 19.7k engine steps: with these values the residual is exactly 0 (the engine's turn ramp is
+# deterministic given the last three turn inputs). Keys with turn[t] == 0 give 0.
+_TURN = {(-1, -1, -1): -14.06, (-1, -1, 1): 14.06, (-1, 0, -1): -7.03, (-1, 0, 1): 7.03,
+         (-1, 1, -1): -14.06, (-1, 1, 1): 14.06, (0, -1, -1): -12.3, (0, -1, 1): 12.3,
+         (0, 0, -1): -7.03, (0, 0, 1): 7.03, (0, 1, -1): -12.3, (0, 1, 1): 12.3,
+         (1, -1, -1): -14.06, (1, -1, 1): 14.06, (1, 0, -1): -7.03, (1, 0, 1): 7.03,
          (1, 1, -1): -14.06, (1, 1, 1): 14.06}
 
 _RAY_ANG = np.arange(NUM_RAYS) * (2 * np.pi / NUM_RAYS)  # CCW from forward
@@ -40,6 +43,8 @@ class Features:
         self.map = np.zeros((N_FIXED, G * G + 1), np.float32)
         self.x = self.y = self.h = 0.0
         self.turns = [0, 0]
+        self.n = 0  # integrated steps since reset
+        self.keys_held = 0.0
         self.prev_vel = np.zeros(2, np.float32)
         self.prev_action = np.zeros(9, np.float32)
         self.first = True
@@ -58,8 +63,16 @@ class Features:
         if not self.first:
             a = np.asarray(action, np.float32)
             t = int(a[4]) - int(a[5])
-            dh = np.radians(_TURN.get((self.turns[-2], self.turns[-1], t), 0.0))
+            self.n += 1
+            if self.n == 1:  # engine ignores the turn input on the first step after reset
+                deg = 0.0
+            elif self.n == 2:  # then a short startup ramp (measured for all 81 four-step starts)
+                deg = t * (3.52 if self.turns[-1] != 0 else 1.76)
+            else:
+                deg = _TURN.get((self.turns[-2], self.turns[-1], t), 0.0)
+            dh = np.radians(deg)
             self.turns.append(t)
+            del self.turns[:-2]
             h_mid = self.h + dh / 2
             f, r = (self.prev_vel + vel) * 2.0  # average velocity x 4 tics
             self.x += f * np.cos(h_mid) + r * np.sin(h_mid)
@@ -72,6 +85,7 @@ class Features:
 
         M = self.map
         M[6] *= 0.9  # enemy memory fades
+        M[8] *= RECENT_DECAY
         # rays -> free space + typed hits
         dist = np.asarray(obs["rays"]["distance"], np.float32) * RAY_RANGE
         ht = np.asarray(obs["rays"]["hit_type"], np.int64)
@@ -86,7 +100,10 @@ class Features:
         # locked-door marks are long-horizon landmarks: only erase them from close range, so heading
         # drift on far rays cannot wipe a remembered locked door
         near = free & (_SAMPLES[None, :] < 192)
-        M[3, self._cell(fx[near], fy[near])] = 0
+        nidx = self._cell(fx[near], fy[near])
+        M[3, nidx] = 0
+        # rays stop at pickups, so open space seen up close holds no key/item any more (picked up)
+        M[4:6, nidx] = 0
         hit = ht > 0
         hidx = self._cell(self.x + dx[hit] * (dist[hit] + 8), self.y + dy[hit] * (dist[hit] + 8))
         chan = np.array([0, 1, 2, 3, 6, 5])[ht[hit]]
@@ -104,8 +121,17 @@ class Features:
         M[6, eidx[mask & np.isin(et, ENEMY_T)]] = 1
         # visits (curiosity source)
         pidx = int(self._cell(self.x, self.y))
+        kh = float(vit[8:14].sum())
+        if kh > self.keys_held:  # just picked a key up: drop the key mark around us
+            cx, cy = pidx % G, pidx // G
+            for oy in (-1, 0, 1):
+                for ox in (-1, 0, 1):
+                    if 0 <= cx + ox < G and 0 <= cy + oy < G:
+                        M[4, (cy + oy) * G + cx + ox] = 0
+        self.keys_held = kh
         new_cell = pidx != PAD and M[7, pidx] == 0
         M[7, pidx] += 1
+        M[8, pidx] = 1.0
         M[:, PAD] = 0
 
         # heading-aligned crop indices
@@ -121,5 +147,7 @@ class Features:
         ents = np.concatenate([np.clip(feat, -10, 10) * np.array([1, 1, 1, 0.1, 0.1], np.float32),
                                mask[:, None].astype(np.float32)], 1)
         out = {"vec": vec, "rays": rays, "ents": ents.astype(np.float32), "etype": et * mask,
-               "map": crop.astype(np.float16), "crop_idx": crop_idx, "pos_idx": np.int64(pidx)}
+               "map": crop.astype(np.float16), "crop_idx": crop_idx, "pos_idx": np.int64(pidx),
+               # action mask (allowed by RULES.md): no weapon switch while the held weapon has ammo
+               "wmask": np.float32(0.0 if vit[3] > 0 else 1.0)}
         return out, bool(new_cell)

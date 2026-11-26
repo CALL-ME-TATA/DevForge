@@ -15,6 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+import vizdoom as vd
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "submission"), str(ROOT / "training"), str(ROOT / "env")]
@@ -72,7 +73,8 @@ def cur_to_plain(p):
 # reward / map-pool settings (CLI flags in main(); defaults = original behaviour)
 DEFAULT_CFG = dict(maps_per_bin=40, dmg_pen=0.01, death_pen=3.0, cell_rew=0.01,
                    shape_k=0.0, hard_floor=0.05, key_gate=0.5, weapon_pen=0.0, shot_pen=0.0, door_use=0.0,
-                   rev_p=0.0, assist=0.0, assist_until=0.6, edge_p=0.0, edge_every=32, edge_dir="")
+                   rev_p=0.0, assist=0.0, assist_until=0.6, edge_p=0.0, edge_every=32, edge_dir="",
+                   back_pen=0.0, turn_pen=0.0, use_bounce=0.02, hit_rew=0.0, aim_k=0.0, mask_back=0)
 
 KEY_IDX = {"B": 0, "Y": 1, "R": 2}  # lock colour -> doom_env KEY_NAMES index (Blue/Yellow/Red card)
 KEY_THING_COLOUR = {13: "R", 5: "B", 6: "Y"}  # mapgen KEY_THING inverse
@@ -363,6 +365,7 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
     from doom_env import make_env
     from doom_env.wrapper import IWAD
     from features import Features
+    from action_mask import mask_actions
 
     import tempfile
     from mapgen import FAMILIES, generate, write_map
@@ -488,7 +491,8 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
             used = {tuple(d) for d in case["used"]}
         S.update(bin=b, ps=ps, visited=visited, opened=opened0,
                  used_doors=used, last_use=-99, last_sw=-99, t=0, ret=0.0, use_prev=0, phi=None, goal=None,
-                 shaped=0.0, obs=obs, terms=defaultdict(float), trace=[], snaps=[])
+                 shaped=0.0, obs=obs, terms=defaultdict(float), trace=[], snaps=[],
+                 hits=env._game.get_game_variable(vd.GameVariable.HITCOUNT))
         f["priv"] = priv_of(ps)
         return f, ps
 
@@ -541,6 +545,8 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
             return
         gstep[0] += 1
         obs_prev = S["obs"]  # what the agent saw when it chose `a`
+        if cfg["mask_back"]:  # same observation-based action mask as submission/agent.py
+            a = mask_actions(a, obs_prev)
         if S.pop("pending_end", False):
             obs, term, trunc, info = finish_now()
         else:
@@ -555,6 +561,14 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
             return x
 
         r = add("step", -0.001)
+        ve_prev = obs_prev["visible_entities"]
+        enemy_seen = np.isin(ve_prev["entity_type"][ve_prev["mask"].astype(bool)], (1, 2, 3)).any()
+        # walking backwards blinds the 90-degree entity view and points USE/ATTACK away from the path;
+        # backing off while an enemy is in view (kiting) stays free
+        if cfg["back_pen"] > 0 and obs["vitals"][14] < -1.0 and not enemy_seen:
+            r += add("back", -cfg["back_pen"])
+        if cfg["turn_pen"] > 0 and a[4] != a[5]:  # constant turning + moving = circling in place
+            r += add("turn", -cfg["turn_pen"])
         # --- edge-case fixes (training-time reward only; see README "Edge cases") ---
         vit, vit1 = obs_prev["vitals"], obs["vitals"]
         if cfg["weapon_pen"] > 0:
@@ -565,10 +579,29 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
                 S["last_sw"] = S["t"]
             if vit[3] <= 0 and (vit[4] > 0 or vit[5] > 0):  # holding fists/empty gun while bullets/shells exist
                 r += add("weapon", -0.2 * cfg["weapon_pen"])
+        # --- combat (training-time reward only) ---
+        hits = env._game.get_game_variable(vd.GameVariable.HITCOUNT)
+        if cfg["hit_rew"] > 0:  # dense aiming signal: engine hit counter (never seen by the agent)
+            r += add("hit", cfg["hit_rew"] * max(0.0, hits - S["hits"]))
+        S["hits"] = hits
+        if cfg["aim_k"] > 0:
+            # potential-based aim shaping: phi = -aim_k * (angle to the nearest visible enemy / 45 deg),
+            # only while an enemy is visible before and after the step (so it cannot be farmed)
+            def aim(o):
+                ve = o["visible_entities"]
+                m = ve["mask"].astype(bool) & np.isin(ve["entity_type"], (1, 2, 3))
+                if not m.any():
+                    return None
+                ft = ve["features"][m]
+                return float(np.abs(np.arctan2(ft[:, 1], ft[:, 2])).min()) / math.radians(45)
+            g0, g1 = aim(obs_prev), aim(obs)
+            if g0 is not None and g1 is not None:
+                r += add("aim", cfg["aim_k"] * (min(g0, 1.0) - min(g1, 1.0)))
         if cfg["shot_pen"] > 0 and a[6]:  # firing with no enemy in view wastes ammo
             ve = obs_prev["visible_entities"]
             if not np.isin(ve["entity_type"][ve["mask"].astype(bool)], (1, 2, 3)).any():
-                r += add("shot", -cfg["shot_pen"])
+                spent = float(np.sum(vit[4:8]) - np.sum(vit1[4:8]))
+                r += add("shot", -cfg["shot_pen"] * max(1.0, spent))  # per round actually fired
         r += add("kill", 1.0 * (p1["kills"] - p0["kills"]))
         r += add("damage", -cfg["dmg_pen"] * max(0.0, p1["damage_taken"] - p0["damage_taken"]))
         dkeys = float(p1["keys"].sum() - p0["keys"].sum())
@@ -592,7 +625,7 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
             r += add("explore", cfg["cell_rew"])
         if a[7] and not S["use_prev"]:
             if S["t"] - S["last_use"] < 8:
-                r += add("use", -0.02)  # re-pressing USE bounces a moving door
+                r += add("use", -cfg["use_bounce"])  # re-pressing USE bounces a moving door
             elif cfg["door_use"] > 0 and S.get("shaper") is not None:
                 # fresh USE next to a door: paid ONCE per door per episode, never for a locked door without
                 # its key (otherwise pressing USE at a door every 8 steps out-earns the exit)
@@ -711,7 +744,7 @@ class Envs:
 
 
 # ------------------------------------------------------------------ helpers
-KEYS = ("vec", "rays", "ents", "etype", "map", "crop_idx", "pos_idx", "priv")  # priv: critic only
+KEYS = ("vec", "rays", "ents", "etype", "map", "crop_idx", "pos_idx", "wmask", "priv")  # priv: critic only
 
 
 def stack(fs):
@@ -842,6 +875,18 @@ def main():
                     help="penalty per shot fired with no enemy in view")
     ap.add_argument("--door-use", type=float, default=DEFAULT_CFG["door_use"],
                     help="reward for the first USE press next to each closed door (generated maps)")
+    ap.add_argument("--mask-back", type=int, default=DEFAULT_CFG["mask_back"],
+                    help="1 = apply submission/action_mask.py (MOVE_BACKWARD only with an enemy in view), "
+                         "exactly as the submitted agent does")
+    ap.add_argument("--back-pen", type=float, default=DEFAULT_CFG["back_pen"],
+                    help="penalty per step moving backwards with no enemy in view")
+    ap.add_argument("--turn-pen", type=float, default=DEFAULT_CFG["turn_pen"], help="penalty per turning step")
+    ap.add_argument("--use-bounce", type=float, default=DEFAULT_CFG["use_bounce"],
+                    help="penalty for re-pressing USE within 8 steps (slams the opening door shut)")
+    ap.add_argument("--hit-rew", type=float, default=DEFAULT_CFG["hit_rew"],
+                    help="reward per enemy hit (engine HITCOUNT, training only)")
+    ap.add_argument("--aim-k", type=float, default=DEFAULT_CFG["aim_k"],
+                    help="potential-based shaping toward the nearest visible enemy (training only)")
     ap.add_argument("--ent-end", type=float, default=None,
                     help="entropy coefficient at the end of the run (linear anneal from --ent); default = --ent")
     ap.add_argument("--rev-p", type=float, default=DEFAULT_CFG["rev_p"],
@@ -870,7 +915,9 @@ def main():
                cell_rew=args.cell_rew, shape_k=args.shape_k, hard_floor=args.hard_floor, key_gate=args.key_gate,
                weapon_pen=args.weapon_pen, shot_pen=args.shot_pen, door_use=args.door_use,
                rev_p=args.rev_p, assist=args.assist, assist_until=args.assist_until,
-               edge_p=args.edge_p, edge_every=args.edge_every, edge_dir=str(Path(args.out) / "edge_cases"))
+               edge_p=args.edge_p, edge_every=args.edge_every, edge_dir=str(Path(args.out) / "edge_cases"),
+               back_pen=args.back_pen, turn_pen=args.turn_pen, use_bounce=args.use_bounce,
+               hit_rew=args.hit_rew, aim_k=args.aim_k, mask_back=args.mask_back)
     print(f"config {cfg}", flush=True)
     if not Path(args.maps, f"gauntlet_4_{args.maps_per_bin - 1}.wad").exists():
         print("generating maps ...", flush=True)

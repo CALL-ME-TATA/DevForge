@@ -105,7 +105,11 @@ class Net(nn.Module):
         L = L.scatter(2, pos, new.unsqueeze(-1))
         pv = self.vpriv(o["priv"]) if "priv" in o else h.new_zeros(B, 64)
         v = self.v(torch.cat([h, pv], -1)).squeeze(-1)
-        return self.pi(h), v, torch.cat([self.aux(h), self.aux2(h)], -1), (h, L)
+        logits = self.pi(h)
+        if "wmask" in o:  # weapon-switch "press" logit (last one) masked while the held weapon has ammo
+            pen = (1.0 - o["wmask"].float().view(B, 1)) * 1e4
+            logits = torch.cat([logits[:, :-1], logits[:, -1:] - pen], 1)
+        return logits, v, torch.cat([self.aux(h), self.aux2(h)], -1), (h, L)
 
 
 def load_compat(net: nn.Module, sd: dict) -> list[str]:
@@ -121,9 +125,16 @@ def load_compat(net: nn.Module, sd: dict) -> list[str]:
             out[k] = t
         elif s.shape == t.shape:
             out[k] = s
-        elif k == "v.weight" and s.shape[0] == t.shape[0] and s.shape[1] < t.shape[1]:
+        elif s.dim() >= 2 and s.shape[0] == t.shape[0] and s.shape[1] < t.shape[1] and s.shape[2:] == t.shape[2:]:
+            # new input channels/columns (privileged critic, extra EgoMap channel): zero weights, so the
+            # loaded network behaves exactly as before until training uses them
             w = torch.zeros_like(t)
-            w[:, :s.shape[1]] = s
+            if k == "map_in.0.weight":  # fixed channels come first, learned ones after: insert the gap
+                nf = N_FIXED - (t.shape[1] - s.shape[1])
+                w[:, :nf] = s[:, :nf]
+                w[:, N_FIXED:] = s[:, nf:]
+            else:
+                w[:, :s.shape[1]] = s
             out[k] = w
             changed.append(k)
         else:
