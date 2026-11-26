@@ -3,8 +3,8 @@
 Everything produced while training and evaluating the agent: evaluation results, logs, maps and every
 checkpoint. Nothing here is needed to run the submission (`submission/`).
 
-Large binaries are stored as plain git files (not Git LFS), so they don't use LFS bandwidth that the
-scorer needs for `submission/weights/model.pt`. Total ≈ 800 MB, under the 1 GB repository limit.
+Only small files are kept here (evaluation results, logs, maps). Videos and checkpoints stay out of
+the repository.
 
 ## Videos
 
@@ -39,16 +39,11 @@ and the fine-tune scheduler log.
 - `maps_gen.tar.gz`: all 12,500 training maps (5 families × 5 levels × 500). They can also be rebuilt
   exactly with `python training/extend_maps.py --per-bin 500` (fixed seeds).
 
-## Checkpoints (`checkpoints/`)
+## Checkpoints
 
-`checkpoints.tar.part00`–`part06` (90 MiB parts) hold every checkpoint: `training_ckpt/` (all files from
-`training/ckpt/`, including full resume points with optimizer state) and `extra_snapshots/` (unique
-weights saved during evals and videos; the shipped it2180 resume point is kept with its optimizer).
-`CONTENTS.txt` lists all 70 files.
-
-```bash
-cat checkpoints.tar.part* > checkpoints.tar && sha256sum -c SHA256SUMS && tar -xf checkpoints.tar
-```
+Training checkpoints are not stored in the repository: the official validator flags large
+non-LFS files, and putting them in LFS would compete with the scorer's download of
+`submission/weights/model.pt`. The shipped weights are `submission/weights/model.pt` (Git LFS).
 
 ## Scripts (`scripts/`)
 

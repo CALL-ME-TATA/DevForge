@@ -232,3 +232,5 @@ training/maps_eval/
 # videos are kept out of the repository (record locally with training/record_video.py)
 *.mp4
 artifacts/videos/
+# checkpoint archives are kept locally, out of the repository (validator: large files not in LFS)
+artifacts/checkpoints/
