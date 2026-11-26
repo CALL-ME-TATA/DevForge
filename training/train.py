@@ -81,7 +81,7 @@ DEFAULT_CFG = dict(maps_per_bin=40, dmg_pen=0.01, death_pen=3.0, cell_rew=0.01,
                    back_pen=0.0, turn_pen=0.002, use_bounce=0.12, hit_rew=0.1, aim_k=0.0, mask_back=1,
                    dagger=0, dagger_beta=0.0, dagger_fade=0.5,
                    key_rew=3.5, stall_pen=0.01, stall_after=48, teacher_explore=0,
-                   fresh_p=0.0, eps_per_map=EPISODES_PER_MAP, extended=0, replay_p=0.0)
+                   fresh_p=0.0, eps_per_map=EPISODES_PER_MAP, extended=0, replay_p=0.0, empty_switch_rew=0.0)
 
 KEY_IDX = {"B": 0, "Y": 1, "R": 2}  # lock colour -> doom_env KEY_NAMES index (Blue/Yellow/Red card)
 KEY_THING_COLOUR = {13: "R", 5: "B", 6: "Y"}  # mapgen KEY_THING inverse
@@ -620,6 +620,10 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
                 S["last_sw"] = S["t"]
             if vit[3] <= 0 and (vit[4] > 0 or vit[5] > 0):  # holding fists/empty gun while bullets/shells exist
                 r += add("weapon", -0.2 * cfg["weapon_pen"])
+                # hand-made-map diagnosis: it held an empty weapon on up to 75% of steps and never switched;
+                # pay a clear bonus for the switch that fixes it (the teacher's labels show the same action)
+                if a[8] and cfg["empty_switch_rew"] > 0:
+                    r += add("weapon", cfg["empty_switch_rew"])
         # --- combat (training-time reward only) ---
         hits = env._game.get_game_variable(vd.GameVariable.HITCOUNT)
         if cfg["hit_rew"] > 0:  # dense aiming signal: engine hit counter (never seen by the agent)
@@ -941,6 +945,8 @@ def main():
     ap.add_argument("--eps-per-map", type=int, default=DEFAULT_CFG["eps_per_map"],
                     help="episodes replayed per loaded map (loading costs ~0.4 s)")
     ap.add_argument("--wd", type=float, default=0.0, help="L2 weight decay (Cobbe et al. 2019: best regulariser)")
+    ap.add_argument("--empty-switch-rew", type=float, default=DEFAULT_CFG["empty_switch_rew"],
+                    help="reward for switching weapon while the held one is empty and other ammo exists")
     ap.add_argument("--replay-p", type=float, default=DEFAULT_CFG["replay_p"],
                     help="probability a fresh-map load replays a previously failed fresh level (Robust PLR / ACCEL)")
     ap.add_argument("--extended", type=int, default=DEFAULT_CFG["extended"],
@@ -1002,7 +1008,7 @@ def main():
                dagger=int(args.bc_w > 0), dagger_beta=args.dagger_beta, dagger_fade=args.dagger_fade,
                key_rew=args.key_rew, stall_pen=args.stall_pen, stall_after=args.stall_after,
                teacher_explore=args.teacher_explore, fresh_p=args.fresh_p, eps_per_map=args.eps_per_map,
-               extended=args.extended, replay_p=args.replay_p)
+               extended=args.extended, replay_p=args.replay_p, empty_switch_rew=args.empty_switch_rew)
     print(f"config {cfg}", flush=True)
     if not Path(args.maps, f"gauntlet_4_{args.maps_per_bin - 1}.wad").exists():
         print("generating maps ...", flush=True)
