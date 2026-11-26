@@ -131,6 +131,8 @@ def main():
     ap.add_argument("--seed-start", type=int, default=5000, help="first map index (training uses 0..499)")
     ap.add_argument("--greedy", action="store_true", help="argmax actions instead of sampling")
     ap.add_argument("--mask", type=int, default=0, help="1 = backward mask on (checkpoints trained with --mask-back 1)")
+    ap.add_argument("--freedoom-start", type=int, default=1,
+                    help="first Freedoom level; training samples MAP01-24, so MAP25-32 are truly unseen")
     ap.add_argument("--maps-dir", default=str(ROOT / "training" / "maps_eval"))
     ap.add_argument("--out", default=str(ROOT / "training" / "eval_results.json"))
     ap.add_argument("--families", nargs="+", default=None,
@@ -140,7 +142,8 @@ def main():
     maps = build_eval_maps(Path(args.maps_dir), args.per_bin, args.levels, args.seed_start, args.families)
     if args.freedoom:
         from doom_env.wrapper import IWAD
-        maps += [("freedoom", IWAD, f"MAP{i:02d}", FAMILY_TICKS["freedoom"]) for i in range(1, args.freedoom + 1)]
+        maps += [("freedoom", IWAD, f"MAP{i:02d}", FAMILY_TICKS["freedoom"])
+                 for i in range(args.freedoom_start, args.freedoom_start + args.freedoom)]
     jobs = [(c, m, 12345 + j, args.greedy, args.mask) for c in args.ckpts for j, m in enumerate(maps)]
     print(f"{len(maps)} held-out maps x {len(args.ckpts)} checkpoints = {len(jobs)} episodes, "
           f"{args.workers} workers", flush=True)

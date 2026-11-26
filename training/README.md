@@ -205,7 +205,14 @@ Held-out levels come from the same generator with seeds never used in training (
 uses 0–499). Every checkpoint plays the same maps with the same seeds. The families map onto the
 evaluation tiers: T1 `arena`, T2 `multi`, T3 `key`, T4 `gauntlet` + Freedoom, plus `tiny` as a basic check.
 
-Levels cleared on 92 unseen maps (levels 0/2/4 × 6 maps per family + 2 Freedoom):
+**Validation set (92 maps):** 90 unseen generated maps (levels 0/2/4 × 6 per family; seeds checked:
+0 overlap with the 12,500 training seeds, 0 identical WAD files) + Freedoom MAP01–02. *Correction:*
+those two Freedoom levels are **not** unseen (training samples MAP01–24). The same set was used all night
+to compare checkpoints and to choose the shipped one, so it is a validation set and its score is
+optimistic. The unbiased number comes from a separate **test set** used once at the end: 100 never-used
+generated maps (seeds 9000–9003, all 5 levels) + Freedoom MAP25–32 (never trained on).
+
+Levels cleared on the validation set:
 
 | Tier | Repo's original weights | 4.5M (PPO) | 14.4M (PPO) | 16.1M (PPO) | **21.4M (DAgger, shipped)** |
 | --- | --- | --- | --- | --- | --- |

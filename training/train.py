@@ -22,7 +22,8 @@ sys.path[:0] = [str(ROOT / "submission"), str(ROOT / "training"), str(ROOT / "en
 
 FAMILY_TICKS = {"tiny": 1050, "arena": 2100, "multi": 3150, "key": 4200, "gauntlet": 4200, "freedoom": 4200}
 LEVELS = 5
-EPISODES_PER_MAP = 8
+EPISODES_PER_MAP = 8  # default for --eps-per-map
+FRESH_SEED_BASE = 10_000_000  # --fresh-p maps: never collides with pool seeds (< 4.1e6) or eval seeds
 
 
 # ------------------------------------------------------------------ curriculum (per worker)
@@ -78,7 +79,8 @@ DEFAULT_CFG = dict(maps_per_bin=40, dmg_pen=0.01, death_pen=3.0, cell_rew=0.01,
                    rev_p=0.0, assist=0.0, assist_until=0.6, edge_p=0.0, edge_every=32, edge_dir="",
                    back_pen=0.0, turn_pen=0.002, use_bounce=0.12, hit_rew=0.1, aim_k=0.0, mask_back=1,
                    dagger=0, dagger_beta=0.0, dagger_fade=0.5,
-                   key_rew=3.5, stall_pen=0.01, stall_after=48, teacher_explore=0)
+                   key_rew=3.5, stall_pen=0.01, stall_after=48, teacher_explore=0,
+                   fresh_p=0.0, eps_per_map=EPISODES_PER_MAP)
 
 KEY_IDX = {"B": 0, "Y": 1, "R": 2}  # lock colour -> doom_env KEY_NAMES index (Blue/Yellow/Red card)
 KEY_THING_COLOUR = {13: "R", 5: "B", 6: "Y"}  # mapgen KEY_THING inverse
@@ -380,6 +382,7 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
     rev = RevCurriculum(rng)
     prog = [0.0]  # fraction of the run done (sent by the learner), drives the fading combat assist
     var_wad = os.path.join(tempfile.gettempdir(), f"doomvar_{wid}_{os.getpid()}.wad")
+    fresh_wad = os.path.join(tempfile.gettempdir(), f"doomfresh_{wid}_{os.getpid()}.wad")
 
     def priv_of(ps):
         """Privileged critic input (training only): distance/goal from the generator layout + state."""
@@ -460,10 +463,17 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
             if fam == "freedoom":
                 wad, mp_ = IWAD, f"MAP{rng.randint(1, 24):02d}"
             else:
-                mi = rng.randrange(cfg["maps_per_bin"])
-                wad, mp_ = os.path.join(map_dir, f"{fam}_{li}_{mi}.wad"), "MAP01"
-                # rebuild this map's layout from its generator seed (same as build_pool)
-                grid, things = layout(fam, li, mi)
+                if cfg["fresh_p"] > 0 and rng.random() < cfg["fresh_p"]:
+                    # unlimited levels (Cobbe et al. 2019/2020): a brand-new layout for this load. Seeds start
+                    # at FRESH_SEED_BASE, far above every pool seed (< 4.1e6) and held-out eval/test seed.
+                    seed = FRESH_SEED_BASE + rng.randrange(1 << 40)
+                    grid, things = generate(fam, li / (LEVELS - 1), seed)
+                    wad, mp_ = write_map(fresh_wad, grid, things), "MAP01"
+                else:
+                    mi = rng.randrange(cfg["maps_per_bin"])
+                    wad, mp_ = os.path.join(map_dir, f"{fam}_{li}_{mi}.wad"), "MAP01"
+                    # rebuild this map's layout from its generator seed (same as build_pool)
+                    grid, things = layout(fam, li, mi)
                 lvl = rev.sample(fam) if fam in REV_FAMILIES and rng.random() < cfg["rev_p"] else None
                 assist = cfg["assist"] * max(0.0, 1 - prog[0] / cfg["assist_until"]) if fam == "gauntlet" else 0.0
                 if lvl is not None or assist > 0:
@@ -472,7 +482,7 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
                 S["shaper"], S["rev"] = GoalShaper(grid, things), lvl
             env = make_env(wad, mp_, episode_ticks=FAMILY_TICKS[fam])
             S.update(bin=b, wad=wad, map=mp_, mi=mi, variant=wad == var_wad)
-            eps_left = EPISODES_PER_MAP
+            eps_left = cfg["eps_per_map"]
         eps_left -= 1
         b = S["bin"]
         obs, _ = env.reset(seed=rng.randrange(1 << 30))
@@ -908,6 +918,11 @@ def main():
                          "teacher's action (training/teacher.py); 0 = off")
     ap.add_argument("--ppo-w", type=float, default=1.0, help="weight of the PPO policy+value+entropy terms (0 = pure imitation)")
     ap.add_argument("--key-rew", type=float, default=DEFAULT_CFG["key_rew"], help="reward per key picked up")
+    ap.add_argument("--fresh-p", type=float, default=DEFAULT_CFG["fresh_p"],
+                    help="probability that a map load generates a brand-new layout (unlimited levels)")
+    ap.add_argument("--eps-per-map", type=int, default=DEFAULT_CFG["eps_per_map"],
+                    help="episodes replayed per loaded map (loading costs ~0.4 s)")
+    ap.add_argument("--wd", type=float, default=0.0, help="L2 weight decay (Cobbe et al. 2019: best regulariser)")
     ap.add_argument("--teacher-explore", type=int, default=DEFAULT_CFG["teacher_explore"],
                     help="1 = information-matched teacher: frontier exploration until the goal has been seen")
     ap.add_argument("--stall-pen", type=float, default=DEFAULT_CFG["stall_pen"],
@@ -964,7 +979,7 @@ def main():
                hit_rew=args.hit_rew, aim_k=args.aim_k, mask_back=args.mask_back,
                dagger=int(args.bc_w > 0), dagger_beta=args.dagger_beta, dagger_fade=args.dagger_fade,
                key_rew=args.key_rew, stall_pen=args.stall_pen, stall_after=args.stall_after,
-               teacher_explore=args.teacher_explore)
+               teacher_explore=args.teacher_explore, fresh_p=args.fresh_p, eps_per_map=args.eps_per_map)
     print(f"config {cfg}", flush=True)
     if not Path(args.maps, f"gauntlet_4_{args.maps_per_bin - 1}.wad").exists():
         print("generating maps ...", flush=True)
@@ -972,7 +987,7 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     net = Net().to(dev)
-    opt = torch.optim.Adam(net.parameters(), lr=args.lr, eps=1e-5)
+    opt = torch.optim.Adam(net.parameters(), lr=args.lr, eps=1e-5, weight_decay=args.wd)
     it0, steps, cur0, edge0 = 0, 0, None, None
     if args.resume and (out / "latest.pt").exists():
         ck = torch.load(out / "latest.pt", map_location=dev)
@@ -981,8 +996,9 @@ def main():
             print(f"resume: re-initialised {changed}; fresh optimizer", flush=True)
         else:
             opt.load_state_dict(ck["opt"])
-        for g_ in opt.param_groups:  # the CLI --lr wins over the lr stored in the checkpoint
+        for g_ in opt.param_groups:  # the CLI --lr / --wd win over the values stored in the checkpoint
             g_["lr"] = args.lr
+            g_["weight_decay"] = args.wd
         it0, steps = ck["iter"], ck["steps"]
         cur0 = ck.get("cur")
         edge0 = ck.get("edge")
