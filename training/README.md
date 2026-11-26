@@ -161,7 +161,7 @@ reward bookkeeping are training-time scaffolding only; the agent observes nothin
 | 8.1M – 9.5M | 500 maps per bin; distance shaping; curriculum floor for multi/key/gauntlet |
 | 9.5M – 16.6M | edge-case fixes (weapon/shot/door), reverse curriculum, asymmetric critic, auxiliary goal heads |
 | 16.6M – 17.7M | backward mask (`--mask-back 1`, same as the agent) |
-| 17.7M – 21.4M | **DAgger from a privileged teacher, PPO weight 0** (below); it2180 = shipped model |
+| 17.7M – 21.4M | **DAgger from a privileged teacher, PPO weight 0** (below) |
 | 21.4M – 23.4M | mentor review: global map, key memory, visits reset, phantom-pickup fix; PPO weight 0.3 + imitation 1.0 → 0.5 (DAPG-style) |
 | 23.4M – end | **information-matched frontier teacher** (below) |
 
@@ -187,6 +187,22 @@ key or the exit has been seen, goes to the **nearest frontier through seen space
 once the goal is seen it takes the shortest route. Its decisions now depend only on information the
 student also has in its own map. Alone it clears 81/90 held-out maps, the same as the clairvoyant teacher.
 `record_backtrack.py` renders the search / key-held / gate-open phases on a top-down view.
+
+## Final submission: it2734 (27.1M steps)
+
+Trained to the end with the information-matched frontier teacher + PPO on fresh, structurally randomised
+maps (high-DPS monsters, exit switches), landmark compass, failed-level replay. Same maps and seeds for both:
+
+| Set | it2410 | **it2734 (shipped)** |
+| --- | --- | --- |
+| Test: 100 never-seen generated maps, all 5 difficulties | 70/100 | **72/100** (T0 19, T1 15, T2 15, T3 12, T4 11 of 20) |
+| Test: 60 hard never-seen maps (tough monsters, switches, varied layouts) | 23/60 | **25/60** |
+| Test: hand-made Freedoom MAP25–32 (never seen) | 0/8 exits | 0/8 exits |
+| Validation: 90 generated maps (levels 0/2/4) | 62/90 | 59/90 |
+
+Differences between the two are within the measured seed noise (±2 maps). Official-image validate: PASSED
+(1 CPU, p50 6.7 ms/step, 1.5 GB RAM). Stress tests: 0 crashes / 0 invalid actions on 3,000 fuzzed observations;
+largest hand-made maps within budget.
 
 ## Known limitations
 
@@ -222,7 +238,7 @@ generated maps (seeds 9000–9003, all 5 levels) + Freedoom MAP25–32 (never tr
 
 Levels cleared on the validation set:
 
-| Tier | Repo's original weights | 4.5M (PPO) | 14.4M (PPO) | 16.1M (PPO) | **21.4M (DAgger, shipped)** |
+| Tier | Repo's original weights | 4.5M (PPO) | 14.4M (PPO) | 16.1M (PPO) | **21.4M (DAgger)** |
 | --- | --- | --- | --- | --- | --- |
 | T0 Basics (18) | 6 | 8 | 17 | 17 | 16 |
 | T1 Combat (18) | 1 | 3 | 12 | **16** | 13 |
