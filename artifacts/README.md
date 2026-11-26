@@ -1,29 +1,15 @@
 # Artifacts
 
-Everything produced while training and evaluating the agent: gameplay videos, evaluation results,
-logs, maps and every checkpoint. Nothing here is needed to run the submission (`submission/`).
+Everything produced while training and evaluating the agent: evaluation results, logs, maps and every
+checkpoint. Nothing here is needed to run the submission (`submission/`).
 
 Large binaries are stored as plain git files (not Git LFS), so they don't use LFS bandwidth that the
 scorer needs for `submission/weights/model.pt`. Total ≈ 800 MB, under the 1 GB repository limit.
 
-## Videos (`videos/`, 14 files)
+## Videos
 
-Gameplay of the agent on **held-out maps it never trained on** (generator seeds ≥ 5000; training uses
-0–499). The bar at the top shows the tier, map, iteration, health, ammo, kills and keys; each episode
-ends on a result card. `training/record_video.py` makes them.
-
-| File | Checkpoint | Maps |
-| --- | --- | --- |
-| `doom_agent_latest.mp4` | it1540 (PPO) | one per tier, seeds 5000 |
-| `doom_agent_it1660.mp4` | it1660 (PPO) | same 5 maps |
-| `doom_agent_it1660_fresh_maps.mp4` | it1660 (PPO) | 5 brand-new maps (seeds 7000) |
-| `doom_agent_latest_masked.mp4` | it1720 (PPO + backward mask) | same 5 maps |
-| `doom_agent_dagger.mp4` | it1860 (DAgger) | same 5 maps |
-| `doom_agent_dagger_latest.mp4` | it2150 (DAgger) | same 5 maps |
-| `doom_agent_dagger_fresh_maps.mp4` | it2180 (DAgger, shipped) | the seed-7000 maps |
-| `doom_agent_it2180_4_new_maps.mp4` | it2180 (shipped) | 4 harder new maps (seeds 8000) |
-| `tier3_key_level0..4.mp4` | it2220 (DAgger) | keycard maps, levels 0–4 (seeds 8001) |
-| `agent_changes_explainer.mp4` | — | explainer video |
+Videos are not stored in the repository. Record them locally with `training/record_video.py`
+(game view per map) or `training/record_backtrack.py` (game view + top-down path by phase).
 
 ## Evaluations (`evals/`)
 
