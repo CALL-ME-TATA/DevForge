@@ -190,8 +190,16 @@ student also has in its own map. Alone it clears 81/90 held-out maps, the same a
 
 ## Known limitations
 
-- **Hand-made levels.** 0/2 on the two Freedoom levels in the held-out set; most training is on generated
-  room lattices. If the hidden maps are hand-made, expect lower scores than the generated-map numbers.
+- **Hand-made levels.** 0/8 exits on Freedoom MAP25–32 (never seen) and 0/6 on MAP01–06, while earning
+  partial credit (4–13 kills per level on MAP01–06). These are full campaign levels; the 4,200-tic cap is
+  about two minutes, too short to finish most of them. Per-death diagnosis: (1) losing fights against
+  groups (up to 6 enemies in view), (2) holding an empty weapon for up to 75% of steps and never switching
+  (a habit from generated maps where ammo rarely runs out; now rewarded with `--empty-switch-rew`),
+  (3) damage with no enemy in view (hazard floors / off-screen attackers, absent from the generator).
+  Transfer to human-designed levels "highly depends on the design of the level generators"
+  (Justesen et al. 2018); the generator now adds high-DPS monsters, wall switches and varied structure.
+  Next steps: the same privileged teacher on rasterised real maps (learning by cheating on the target
+  domain), hazard floors and ammo scarcity in the generator, regret-based level design (PAIRED, ACCEL).
 - **Key and lock colours are not observable.** Rays report "locked door" and entities report "key" without
   a colour (only held keys are known from `vitals`), so two-lock levels are solved by trying.
 - **Search is the weakest skill.** On failed runs the agent covers only ~25–35% of the map; the frontier
@@ -256,6 +264,14 @@ python training/tier_report.py training/eval_results.json
 - Chen et al. (2019). Learning by cheating. CoRL.
 - Chaplot et al. (2020). Learning to explore using Active Neural SLAM. ICLR; Object goal navigation using goal-oriented semantic exploration. NeurIPS.
 - Weihs et al. (2021). Bridging the imitation gap by adaptive insubordination. NeurIPS.
+- Justesen et al. (2018). Illuminating generalization in deep RL through procedural level generation. NeurIPS DRL workshop.
+- Cobbe et al. (2019). Quantifying generalization in reinforcement learning. ICML.
+- Kirk et al. (2023). A survey of zero-shot generalisation in deep reinforcement learning. JAIR.
+- Dennis et al. (2020). Emergent complexity and zero-shot transfer via unsupervised environment design (PAIRED). NeurIPS.
+- Parker-Holder et al. (2022). Evolving curricula with regret-based environment design (ACCEL). ICML.
+- Wijmans et al. (2020). DD-PPO: learning near-perfect PointGoal navigators. ICLR.
+- Wayne et al. (2018). Unsupervised predictive memory in a goal-directed agent (MERLIN).
+- Tobin et al. (2017). Domain randomization for transferring deep neural networks from simulation to the real world. IROS.
 - Walsman et al. (2023). Impossibly good experts and how to follow them. ICLR.
 
 - Ng, Harada & Russell (1999). Policy invariance under reward transformations: theory and application to reward shaping. ICML.
