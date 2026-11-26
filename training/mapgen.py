@@ -115,10 +115,22 @@ def _bfs_tree(edges, start):
     return dist, parent, adj
 
 
+SLOT_RANGE = (6, 13)  # extended maps: per-map slot size -> room sizes / corridor lengths vary (structural DR)
+
+
 def generate(family: str, d: float, seed: int, extended: bool = False):
-    grid, things = _generate(family, d, seed)
     if not extended:
-        return grid, things
+        return _generate(family, d, seed)
+    # structural domain randomisation (Tobin et al. 2017; PAIRED/ACCEL): a per-map lattice slot size, from
+    # its own random stream, so the agent cannot overfit one room/corridor geometry
+    global S
+    s_default = S
+    min_room = 5 if family == "arena" else 3  # as in _generate: rooms need S - 2 >= min_room (+1 margin)
+    S = random.Random(seed * 31337 + 7).randint(max(SLOT_RANGE[0], min_room + 3), SLOT_RANGE[1])
+    try:
+        grid, things = _generate(family, d, seed)
+    finally:
+        S = s_default
     return _extend(family, d, seed, grid, things)
 
 
