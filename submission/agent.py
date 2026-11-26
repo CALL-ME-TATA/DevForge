@@ -22,6 +22,9 @@ class DoomAgent:
         if w.exists():
             self.net.load_state_dict(torch.load(w, map_location=self.dev)["model"])
         self.feat = Features()
+        # warm-up (first torch call is slow; __init__ has 60 s, first act() only 10 s)
+        self.reset()
+        self.act(observation_space.sample())
         self.reset()
 
     def reset(self) -> None:
