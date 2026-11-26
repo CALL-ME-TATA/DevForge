@@ -25,10 +25,16 @@ EPISODES_PER_MAP = 8
 
 
 # ------------------------------------------------------------------ curriculum (per worker)
+HARD_FAMILIES = ("multi", "key", "gauntlet")
+
+
 class Curriculum:
-    def __init__(self, rng):
+    def __init__(self, rng, hard_floor: float = 0.05, key_gate: float = 0.5):
         self.rng = rng
         self.p = defaultdict(float)  # EMA exit rate per bin
+        # PLR-style floor (Jiang et al. 2021): unlocked-but-unsolved navigation bins keep being revisited
+        self.hard_floor = hard_floor
+        self.key_gate = key_gate  # multi0 exit rate needed before key0 unlocks
 
     def eligible(self):
         p = self.p
@@ -39,7 +45,7 @@ class Curriculum:
             for li in range(1, LEVELS):
                 if p[(fam, li - 1)] > 0.5:
                     out.append((fam, li))
-        if p[("multi", 0)] > 0.5:
+        if p[("multi", 0)] > self.key_gate:
             out.append(("key", 0))
         if p[("key", 0)] > 0.5:
             out.append(("gauntlet", 0))
@@ -49,7 +55,7 @@ class Curriculum:
 
     def sample(self):
         bins = self.eligible()
-        w = [self.p[b] * (1 - self.p[b]) + 0.05 for b in bins]
+        w = [self.p[b] * (1 - self.p[b]) + (self.hard_floor if b[0] in HARD_FAMILIES else 0.05) for b in bins]
         return self.rng.choices(bins, w)[0]
 
     def update(self, b, success):
@@ -57,14 +63,87 @@ class Curriculum:
 
 
 # ------------------------------------------------------------------ environment worker
-def worker(conn, wid: int, map_dir: str, seed: int):
+def cur_to_plain(p):
+    """Curriculum EMA dict -> {"fam|level": rate} (plain types, loads with torch weights_only)."""
+    return {f"{f}|{li}": float(v) for (f, li), v in p.items()}
+
+
+# reward / map-pool settings (CLI flags in main(); defaults = original behaviour)
+DEFAULT_CFG = dict(maps_per_bin=40, dmg_pen=0.01, death_pen=3.0, cell_rew=0.01,
+                   shape_k=0.0, hard_floor=0.05, key_gate=0.5)
+
+KEY_IDX = {"B": 0, "Y": 1, "R": 2}  # lock colour -> doom_env KEY_NAMES index (Blue/Yellow/Red card)
+KEY_THING_COLOUR = {13: "R", 5: "B", 6: "Y"}  # mapgen KEY_THING inverse
+
+
+class GoalShaper:
+    """TRAINING-ONLY reward scaffolding: potential-based shaping (Ng, Harada & Russell 1999).
+
+    Uses the generator's own layout of the current training map (privileged, training time only;
+    the submitted agent never sees or computes any of this). Potential = -k * corridor distance
+    (4-connected BFS over the 64-unit grid) to the current goal: the exit if it is reachable with
+    the keys already held, otherwise the nearest still-needed reachable key. Locked doors are
+    passable only with their key. Shaping reward = phi(s') - phi(s), so walking back and forth nets 0.
+    """
+
+    def __init__(self, grid, things):
+        self.g = grid
+        self.H, self.W = len(grid), max(len(r) for r in grid)
+        self.exit = [(y, x) for y, row in enumerate(grid) for x, c in enumerate(row) if c == "E"]
+        self.keys = {KEY_THING_COLOUR[t]: (y, x) for (y, x, t, _) in things if t in KEY_THING_COLOUR}
+        self.cache = {}
+
+    def _bfs(self, targets, held):
+        INF = 1 << 30
+        dist = [[INF] * self.W for _ in range(self.H)]
+        q = []
+        for y, x in targets:
+            dist[y][x] = 0
+            q.append((y, x))
+        i = 0
+        while i < len(q):
+            y, x = q[i]
+            i += 1
+            for ny, nx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
+                if 0 <= ny < self.H and 0 <= nx < len(self.g[ny]) and dist[ny][nx] == INF:
+                    c = self.g[ny][nx]
+                    if c == "#" or (c in KEY_IDX and c not in held):
+                        continue
+                    dist[ny][nx] = dist[y][x] + 1
+                    q.append((ny, nx))
+        return dist
+
+    def dist(self, x: float, y: float, held: frozenset):
+        """(goal id, corridor distance in cells) or None if unknown/unreachable."""
+        if held not in self.cache:
+            need = [p for c, p in self.keys.items() if c not in held]
+            self.cache[held] = (self._bfs(self.exit, held), self._bfs(need, held) if need else None)
+        d_exit, d_key = self.cache[held]
+        r, c = math.floor(-y / 64.0), math.floor(x / 64.0)
+        if not (0 <= r < self.H and 0 <= c < len(self.g[r])):
+            return None
+        if d_exit[r][c] < (1 << 30):
+            return ("exit", held), d_exit[r][c]
+        if d_key is not None and d_key[r][c] < (1 << 30):
+            return ("key", held), d_key[r][c]
+        return None
+
+
+def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
+    cfg = {**DEFAULT_CFG, **(cfg or {})}
     os.environ["OMP_NUM_THREADS"] = "1"
     from doom_env import make_env
     from doom_env.wrapper import IWAD
     from features import Features
 
+    from mapgen import FAMILIES, generate
+
     rng = random.Random(seed)
-    cur = Curriculum(rng)
+    cur = Curriculum(rng, hard_floor=cfg["hard_floor"], key_gate=cfg["key_gate"])
+    if cur0:  # restore unlocked bins from the checkpoint so a resume does not restart at "tiny"
+        for k, v in cur0.items():
+            f, li = k.split("|")
+            cur.p[(f, int(li))] = float(v)
     feat = Features()
     env = None
     S = {}
@@ -80,10 +159,15 @@ def worker(conn, wid: int, map_dir: str, seed: int):
                 env.close()
             b = cur.sample()
             fam, li = b
+            S["shaper"] = None
             if fam == "freedoom":
                 wad, mp_ = IWAD, f"MAP{rng.randint(1, 24):02d}"
             else:
-                wad, mp_ = os.path.join(map_dir, f"{fam}_{li}_{rng.randrange(40)}.wad"), "MAP01"
+                mi = rng.randrange(cfg["maps_per_bin"])
+                wad, mp_ = os.path.join(map_dir, f"{fam}_{li}_{mi}.wad"), "MAP01"
+                if cfg["shape_k"] > 0:  # rebuild this map's layout from its generator seed (same as build_pool)
+                    grid, things = generate(fam, li / (LEVELS - 1), FAMILIES.index(fam) * 1_000_000 + li * 10_000 + mi)
+                    S["shaper"] = GoalShaper(grid, things)
             env = make_env(wad, mp_, episode_ticks=FAMILY_TICKS[fam])
             S["bin"], eps_left = b, EPISODES_PER_MAP
         eps_left -= 1
@@ -93,13 +177,16 @@ def worker(conn, wid: int, map_dir: str, seed: int):
         f, _ = feat.step(obs, None)
         ps = env.privileged_state()
         S.update(bin=b, ps=ps, visited={(int(ps["x"] // 64), int(ps["y"] // 64))}, opened=set(),
-                 last_use=-99, t=0, ret=0.0, use_prev=0)
+                 last_use=-99, t=0, ret=0.0, use_prev=0, phi=None, goal=None, shaped=0.0)
         return f, ps
 
     f, ps = start()
     conn.send(f)
     while True:
         cmd, a = conn.recv()
+        if cmd == "cur":
+            conn.send(cur_to_plain(cur.p))
+            continue
         if cmd == "close":
             env.close()
             return
@@ -108,7 +195,7 @@ def worker(conn, wid: int, map_dir: str, seed: int):
         S["t"] += 1
         r = -0.001
         r += 1.0 * (p1["kills"] - p0["kills"])
-        r -= 0.01 * max(0.0, p1["damage_taken"] - p0["damage_taken"])
+        r -= cfg["dmg_pen"] * max(0.0, p1["damage_taken"] - p0["damage_taken"])
         r += 3.0 * float(p1["keys"].sum() - p0["keys"].sum())
         r += 0.2 * max(0, p1["items"] - p0["items"])
         lock, fl, ce = p1["door_lock"], p1["sector_floor"], p1["sector_ceiling"]
@@ -120,17 +207,27 @@ def worker(conn, wid: int, map_dir: str, seed: int):
         visited_before = cell in S["visited"]
         if not visited_before:
             S["visited"].add(cell)
-            r += 0.01
+            r += cfg["cell_rew"]
         if a[7] and not S["use_prev"]:
             if S["t"] - S["last_use"] < 8:
                 r -= 0.02  # re-pressing USE bounces a moving door
             S["last_use"] = S["t"]
         S["use_prev"] = int(a[7])
         done = term or trunc
+        if S.get("shaper") is not None and not done:
+            held = frozenset(c for c, i in KEY_IDX.items() if p1["keys"][i] > 0)
+            gd = S["shaper"].dist(p1["x"], p1["y"], held)
+            if gd is not None:
+                goal, dcell = gd
+                phi = -cfg["shape_k"] * dcell
+                if S["phi"] is not None and S["goal"] == goal:  # no shaping on goal switches (key pickup)
+                    r += phi - S["phi"]
+                    S["shaped"] += phi - S["phi"]
+                S["phi"], S["goal"] = phi, goal
         if info["exit_reached"]:
             r += 10.0 + 2.0 * p1["health"] / 100 + 2.0 * (1 - p1["tic"] / p1["episode_ticks"])
         elif term:
-            r -= 3.0
+            r -= cfg["death_pen"]
         f_next, new_cell = feat.step(obs, a)
         r += 0.02 * new_cell  # agent-internal episodic curiosity (own dead-reckoned map)
         S["ret"] += r
@@ -146,12 +243,13 @@ def worker(conn, wid: int, map_dir: str, seed: int):
 
 
 class Envs:
-    def __init__(self, n, map_dir, seed):
+    def __init__(self, n, map_dir, seed, cur0=None, cfg=None):
         ctx = mp.get_context("spawn")
         self.conns, self.procs = [], []
         for i in range(n):
             a, b = ctx.Pipe()
-            p = ctx.Process(target=worker, args=(b, i, map_dir, seed * 1000 + i), daemon=True)
+            c0 = cur0[i % len(cur0)] if cur0 else None
+            p = ctx.Process(target=worker, args=(b, i, map_dir, seed * 1000 + i, c0, cfg), daemon=True)
             p.start()
             self.conns.append(a)
             self.procs.append(p)
@@ -161,6 +259,12 @@ class Envs:
     def step(self, actions):
         for c, a in zip(self.conns, actions):
             c.send(("step", a))
+        return [c.recv() for c in self.conns]
+
+    def curricula(self):
+        """Per-worker curriculum state (called between steps, so workers are idle)."""
+        for c in self.conns:
+            c.send(("cur", None))
         return [c.recv() for c in self.conns]
 
     def close(self):
@@ -267,6 +371,18 @@ def main():
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--iters", type=int, default=0, help="stop after N iterations (smoke test)")
+    ap.add_argument("--maps-per-bin", type=int, default=DEFAULT_CFG["maps_per_bin"],
+                    help="layouts per (family, level) bin to sample from (grow pool: training/extend_maps.py)")
+    ap.add_argument("--dmg-pen", type=float, default=DEFAULT_CFG["dmg_pen"], help="penalty per HP of damage")
+    ap.add_argument("--death-pen", type=float, default=DEFAULT_CFG["death_pen"], help="penalty for dying")
+    ap.add_argument("--cell-rew", type=float, default=DEFAULT_CFG["cell_rew"], help="reward per new 64u cell")
+    ap.add_argument("--shape-k", type=float, default=DEFAULT_CFG["shape_k"],
+                    help="training-only potential shaping: reward per cell of corridor distance gained toward "
+                         "the current goal (key, then exit); 0 = off")
+    ap.add_argument("--hard-floor", type=float, default=DEFAULT_CFG["hard_floor"],
+                    help="minimum curriculum weight for unlocked multi/key/gauntlet bins")
+    ap.add_argument("--key-gate", type=float, default=DEFAULT_CFG["key_gate"],
+                    help="multi0 exit rate needed before key0 unlocks")
     args = ap.parse_args()
 
     import torch
@@ -275,24 +391,31 @@ def main():
 
     torch.manual_seed(args.seed)
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if not Path(args.maps, "gauntlet_4_39.wad").exists():
+    cfg = dict(maps_per_bin=args.maps_per_bin, dmg_pen=args.dmg_pen, death_pen=args.death_pen,
+               cell_rew=args.cell_rew, shape_k=args.shape_k, hard_floor=args.hard_floor, key_gate=args.key_gate)
+    print(f"config {cfg}", flush=True)
+    if not Path(args.maps, f"gauntlet_4_{args.maps_per_bin - 1}.wad").exists():
         print("generating maps ...", flush=True)
-        build_pool(args.maps, per_bin=40, levels=tuple(i / (LEVELS - 1) for i in range(LEVELS)))
+        build_pool(args.maps, per_bin=args.maps_per_bin, levels=tuple(i / (LEVELS - 1) for i in range(LEVELS)))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     net = Net().to(dev)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr, eps=1e-5)
-    it0, steps = 0, 0
+    it0, steps, cur0 = 0, 0, None
     if args.resume and (out / "latest.pt").exists():
         ck = torch.load(out / "latest.pt", map_location=dev)
         net.load_state_dict(ck["model"])
         opt.load_state_dict(ck["opt"])
+        for g_ in opt.param_groups:  # the CLI --lr wins over the lr stored in the checkpoint
+            g_["lr"] = args.lr
         it0, steps = ck["iter"], ck["steps"]
-        print(f"resumed at iter {it0}, {steps} steps", flush=True)
+        cur0 = ck.get("cur")
+        print(f"resumed at iter {it0}, {steps} steps, lr {args.lr}, ent {args.ent}, "
+              f"curriculum {'restored' if cur0 else 'fresh'}", flush=True)
 
     N, T, C = args.envs, args.T, args.chunk
     nch = T // C
-    envs = Envs(N, args.maps, args.seed)
+    envs = Envs(N, args.maps, args.seed, cur0, cfg)
     obs = stack(envs.first)
     starts = np.ones(N, bool)
     pol = GraphPolicy(net, obs, dev)
@@ -402,7 +525,8 @@ def main():
               + " ".join(f"{k} {np.mean(v):.3f}" for k, v in stats.items()) + f" | exit {fs}", flush=True)
         eps_log = recent
         if it % 10 == 0 or time.time() >= t_end:
-            ck = {"model": net.state_dict(), "opt": opt.state_dict(), "iter": it, "steps": steps}
+            ck = {"model": net.state_dict(), "opt": opt.state_dict(), "iter": it, "steps": steps,
+                  "cur": envs.curricula()}
             torch.save(ck, out / "latest.pt.tmp")
             os.replace(out / "latest.pt.tmp", out / "latest.pt")
             if it % 50 == 0:

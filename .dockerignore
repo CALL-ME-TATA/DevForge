@@ -1,0 +1,7 @@
+# The official image only COPYs docker/requirements.lock and env/; keep the build context small.
+.venv/
+.git/
+training/maps_gen/
+training/maps_eval/
+training/ckpt/
+**/__pycache__/

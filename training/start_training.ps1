@@ -1,7 +1,7 @@
 # Start (or resume) training in a Linux Docker container on this machine.
 # Needs: Docker Desktop (WSL2 backend) running + NVIDIA driver. Run from the repo root:
-#   powershell -ExecutionPolicy Bypass -File training\start_training.ps1 [-Hours 8]
-param([double]$Hours = 8)
+#   powershell -ExecutionPolicy Bypass -File training\start_training.ps1 [-Hours 8] [-Extra "--lr 1.5e-4 --ent 0.005"]
+param([double]$Hours = 8, [string]$Extra = "")
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
@@ -25,6 +25,6 @@ New-Item -ItemType Directory -Force training/ckpt | Out-Null
 if (Test-Path training/ckpt/latest.pt) { Write-Host "Resuming from training/ckpt/latest.pt" }
 docker rm -f doomrun *> $null
 docker run -d --name doomrun --restart on-failure --gpus all --shm-size 4g -v "${root}:/w" doom-train `
-    sh -c "python -u training/train.py --envs $envs --hours $Hours --resume 2>&1 | grep --line-buffered -v -e nested -e UserWarning -e 'output = torch' | tee -a training/ckpt/train.log"
+    sh -c "python -u training/train.py --envs $envs --hours $Hours --resume $Extra 2>&1 | grep --line-buffered -v -e nested -e UserWarning -e 'output = torch' | tee -a training/ckpt/train.log"
 if ($LASTEXITCODE -ne 0) { throw "failed to start container" }
 Write-Host "Training started. Watch progress:  Get-Content training\ckpt\train.log -Wait -Tail 5"
