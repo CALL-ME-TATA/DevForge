@@ -80,11 +80,11 @@ DEFAULT_CFG = dict(maps_per_bin=40, dmg_pen=0.01, death_pen=3.0, cell_rew=0.01,
                    back_pen=0.0, turn_pen=0.002, use_bounce=0.12, hit_rew=0.1, aim_k=0.0, mask_back=1,
                    dagger=0, dagger_beta=0.0, dagger_fade=0.5,
                    key_rew=3.5, stall_pen=0.01, stall_after=48, teacher_explore=0,
-                   fresh_p=0.0, eps_per_map=EPISODES_PER_MAP)
+                   fresh_p=0.0, eps_per_map=EPISODES_PER_MAP, extended=0)
 
 KEY_IDX = {"B": 0, "Y": 1, "R": 2}  # lock colour -> doom_env KEY_NAMES index (Blue/Yellow/Red card)
 KEY_THING_COLOUR = {13: "R", 5: "B", 6: "Y"}  # mapgen KEY_THING inverse
-MONSTER_THINGS = (3004, 9, 3001, 3002)  # mapgen MONSTERS
+MONSTER_THINGS = (3004, 9, 3001, 3002, 65, 3005, 69, 58, 3006, 3003)  # mapgen MONSTERS + TOUGH_MONSTERS
 
 # ------------------------------------------------------------------ reverse curriculum (training only)
 # Florensa et al. 2017 / Go-Explore's backward algorithm: on long key -> door -> exit maps, start some
@@ -307,7 +307,7 @@ class GoalShaper:
     def __init__(self, grid, things):
         self.g = grid
         self.H, self.W = len(grid), max(len(r) for r in grid)
-        self.exit = [(y, x) for y, row in enumerate(grid) for x, c in enumerate(row) if c == "E"]
+        self.exit = [(y, x) for y, row in enumerate(grid) for x, c in enumerate(row) if c in "EX"]  # X = switch
         self.keys = {KEY_THING_COLOUR[t]: (y, x) for (y, x, t, _) in things if t in KEY_THING_COLOUR}
         self.cache = {}
 
@@ -467,7 +467,7 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
                     # unlimited levels (Cobbe et al. 2019/2020): a brand-new layout for this load. Seeds start
                     # at FRESH_SEED_BASE, far above every pool seed (< 4.1e6) and held-out eval/test seed.
                     seed = FRESH_SEED_BASE + rng.randrange(1 << 40)
-                    grid, things = generate(fam, li / (LEVELS - 1), seed)
+                    grid, things = generate(fam, li / (LEVELS - 1), seed, extended=bool(cfg["extended"]))
                     wad, mp_ = write_map(fresh_wad, grid, things), "MAP01"
                 else:
                     mi = rng.randrange(cfg["maps_per_bin"])
@@ -923,6 +923,8 @@ def main():
     ap.add_argument("--eps-per-map", type=int, default=DEFAULT_CFG["eps_per_map"],
                     help="episodes replayed per loaded map (loading costs ~0.4 s)")
     ap.add_argument("--wd", type=float, default=0.0, help="L2 weight decay (Cobbe et al. 2019: best regulariser)")
+    ap.add_argument("--extended", type=int, default=DEFAULT_CFG["extended"],
+                    help="fresh maps use extended content: high-DPS monsters, more weapons/ammo, exit wall switches")
     ap.add_argument("--teacher-explore", type=int, default=DEFAULT_CFG["teacher_explore"],
                     help="1 = information-matched teacher: frontier exploration until the goal has been seen")
     ap.add_argument("--stall-pen", type=float, default=DEFAULT_CFG["stall_pen"],
@@ -979,7 +981,8 @@ def main():
                hit_rew=args.hit_rew, aim_k=args.aim_k, mask_back=args.mask_back,
                dagger=int(args.bc_w > 0), dagger_beta=args.dagger_beta, dagger_fade=args.dagger_fade,
                key_rew=args.key_rew, stall_pen=args.stall_pen, stall_after=args.stall_after,
-               teacher_explore=args.teacher_explore, fresh_p=args.fresh_p, eps_per_map=args.eps_per_map)
+               teacher_explore=args.teacher_explore, fresh_p=args.fresh_p, eps_per_map=args.eps_per_map,
+               extended=args.extended)
     print(f"config {cfg}", flush=True)
     if not Path(args.maps, f"gauntlet_4_{args.maps_per_bin - 1}.wad").exists():
         print("generating maps ...", flush=True)

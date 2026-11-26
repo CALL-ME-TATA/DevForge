@@ -26,6 +26,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from mapgen import switch_side
 
 CELL = 64.0
 ENEMY_TYPES = (1, 2, 3)  # doom_env.spaces.ENTITY_TYPES: enemy_melee, enemy_hitscan, enemy_projectile
@@ -264,6 +265,15 @@ class Teacher:
         if not engaged and path is not None:
             if not path:  # standing on the goal cell
                 move, turn = F, 2
+                if kind == "exit" and self.sh.g[r][c] == "X":  # exit switch: face that wall, press USE once
+                    side = switch_side(self.sh.g, r, c)
+                    if side is not None:
+                        want = {(0, 1): 0.0, (0, -1): 180.0, (-1, 0): 90.0, (1, 0): 270.0}[side]
+                        err = wrap(want - ang)
+                        turn = L if err > 9 else (R if err < -9 else 2)
+                        move = F if abs(err) < 20 else N
+                        if abs(err) < 15:
+                            use = self._press_use()
             else:
                 err = nav_err
                 if self.turn_dir is not None and (abs(err) < TURN_STOP or (self.turn_dir == L) != (err > 0)):

@@ -17,16 +17,20 @@ TIER = {"tiny": "T0", "arena": "T1", "multi": "T2", "key": "T3", "gauntlet": "T4
 
 
 def run(job):
-    fam, li, mi, explore = job
+    fam, li, mi, explore, extended = job
     import warnings
     warnings.filterwarnings("ignore")
-    from mapgen import FAMILIES, generate
+    import os, tempfile
+    from mapgen import FAMILIES, generate, write_map
     from train import GoalShaper
     from teacher import Teacher, idx_to_buttons
     from doom_env import make_env
-    grid, things = generate(fam, li / 4, FAMILIES.index(fam) * 1_000_000 + li * 10_000 + mi)
+    grid, things = generate(fam, li / 4, FAMILIES.index(fam) * 1_000_000 + li * 10_000 + mi, extended=extended)
     t = Teacher(GoalShaper(grid, things), explore=explore)
-    env = make_env(str(ROOT / "training" / "maps_eval" / f"{fam}_{li}_{mi}.wad"), "MAP01", episode_ticks=TICKS[fam])
+    wad = str(ROOT / "training" / "maps_eval" / f"{fam}_{li}_{mi}.wad")
+    if extended:  # extended maps are generated on the fly (high-DPS monsters, exit switches)
+        wad = write_map(os.path.join(tempfile.gettempdir(), f"ext_{fam}_{li}_{mi}_{os.getpid()}.wad"), grid, things)
+    env = make_env(wad, "MAP01", episode_ticks=TICKS[fam])
     obs, _ = env.reset(seed=12345)
     steps, invalid, back_noenemy, turning, still = 0, 0, 0, 0, 0
     while True:
@@ -43,7 +47,8 @@ def run(job):
     ps = env.privileged_state()
     env.close()
     out = "exit" if info["exit_reached"] else ("died" if ps["dead"] else "timeout")
-    return dict(fam=fam, li=li, mi=mi, out=out, steps=steps, kills=ps["kills"], keys=float(ps["keys"].sum()),
+    switch = any("X" in row for row in grid)
+    return dict(fam=fam, li=li, mi=mi, out=out, switch=switch, steps=steps, kills=ps["kills"], keys=float(ps["keys"].sum()),
                 invalid=invalid, turning=turning, still=still)
 
 
@@ -54,8 +59,9 @@ def main():
     ap.add_argument("--start", type=int, default=5000)
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--explore", type=int, default=0, help="1 = frontier-exploring teacher")
+    ap.add_argument("--extended", type=int, default=0, help="1 = extended maps (generated on the fly)")
     args = ap.parse_args()
-    jobs = [(f, li, i, bool(args.explore)) for f in TICKS for li in args.levels for i in range(args.start, args.start + args.per_bin)]
+    jobs = [(f, li, i, bool(args.explore), bool(args.extended)) for f in TICKS for li in args.levels for i in range(args.start, args.start + args.per_bin)]
     with mp.get_context("spawn").Pool(args.workers) as pool:
         res = list(pool.imap_unordered(run, jobs))
     by = defaultdict(list)
@@ -71,6 +77,8 @@ def main():
     tot = Counter(r["out"] for r in res)
     print(f"{'ALL':<14}{len(res):>5}{tot['exit']:>6}{tot['died']:>6}{tot['timeout']:>6}")
     n = sum(r["steps"] for r in res)
+    sw = [r for r in res if r["switch"]]
+    print(f"exit-switch maps: {len(sw)}, cleared {sum(r['out'] == 'exit' for r in sw)}")
     print(f"no-label steps {100 * sum(r['invalid'] for r in res) / n:.1f}% | turning on {100 * sum(r['turning'] for r in res) / n:.0f}% of steps"
           f" | standing still {100 * sum(r['still'] for r in res) / n:.0f}% of steps")
 

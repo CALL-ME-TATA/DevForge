@@ -22,6 +22,24 @@ LOCKS = {"R": 1, "B": 2, "Y": 3}  # mapinfo.py LOCK_RED/BLUE/YELLOW
 KEY_THING = {"R": 13, "B": 5, "Y": 6}  # red/blue/yellow keycard
 MONSTERS = [(3004, 1.0), (9, 0.6), (3001, 1.0), (3002, 0.4)]  # zombieman, shotgun guy, imp, demon
 ITEMS = [2011, 2012, 2007, 2008, 2018, 2001]  # stimpack, medikit, clip, shells, armor, shotgun
+# --- extended content (generate(..., extended=True)); drawn from a SEPARATE random stream so the
+# original maps of every seed stay byte-identical (training pool, held-out eval and test sets) ---
+# high-DPS / tanky monsters the evaluation maps use: weight per unit of difficulty d (absent at d=0)
+TOUGH_MONSTERS = [(65, 1.0), (3005, 0.7), (69, 0.5), (58, 0.5), (3006, 0.5), (3003, 0.15)]
+# chaingunner, cacodemon, hell knight, spectre, lost soul, baron of hell
+EXTRA_ITEMS = [2002, 82, 2048, 2049, 2012, 2018]  # chaingun, super shotgun, bullet box, shell box, medikit, armor
+SWITCH_EXIT_P = 0.35  # share of extended maps whose exit is a wall switch (USE) instead of a floor pad
+SWITCH_TEX = "SW1STARG"
+
+
+def switch_side(grid, y, x):
+    """Wall side carrying the exit switch for an 'X' cell: first wall neighbour in the order
+    right, left, up, down (to_udmf and the training teacher both use this)."""
+    for dy, dx in ((0, 1), (0, -1), (-1, 0), (1, 0)):
+        ny, nx = y + dy, x + dx
+        if not (0 <= ny < len(grid) and 0 <= nx < len(grid[ny])) or grid[ny][nx] == "#":
+            return dy, dx
+    return None
 FAMILIES = ("tiny", "arena", "multi", "key", "gauntlet")
 
 
@@ -97,7 +115,57 @@ def _bfs_tree(edges, start):
     return dist, parent, adj
 
 
-def generate(family: str, d: float, seed: int):
+def generate(family: str, d: float, seed: int, extended: bool = False):
+    grid, things = _generate(family, d, seed)
+    if not extended:
+        return grid, things
+    return _extend(family, d, seed, grid, things)
+
+
+def _extend(family, d, seed, grid, things):
+    """Extended content from its own random stream: upgrade some monsters to high-DPS / tanky types
+    (more with difficulty, most in gauntlets), add weapons/ammo/health to make them winnable, and turn
+    some exits into wall switches (USE)."""
+    rng = random.Random(seed * 7919 + 104729)
+    g = [list(r) for r in grid]
+    mon_ids = {m for m, _ in MONSTERS}
+    p_tough = {"arena": 0.35, "gauntlet": 0.5}.get(family, 0.25) * d
+    out = []
+    for y, x, t, a in things:
+        if t in mon_ids and rng.random() < p_tough:
+            t = rng.choices([m for m, _ in TOUGH_MONSTERS], [w for _, w in TOUGH_MONSTERS])[0]
+        out.append((y, x, t, a))
+    used = {(y, x) for y, x, _, _ in out}
+    free = [(y, x) for y in range(len(g)) for x in range(len(g[y])) if g[y][x] == "." and (y, x) not in used]
+    n_extra = round((1 + 3 * d) * (1.5 if family in ("arena", "gauntlet") else 0.5))
+    for _ in range(n_extra):
+        if not free:
+            break
+        p = free.pop(rng.randrange(len(free)))
+        out.append((p[0], p[1], rng.choice(EXTRA_ITEMS), 0))
+    if family != "arena" and rng.random() < SWITCH_EXIT_P:
+        ex = [(y, x) for y in range(len(g)) for x in range(len(g[y])) if g[y][x] == "E"]
+        if ex:
+            # the exit pad sits mid-room: move it to the nearest floor cell of the same room that touches a
+            # wall (BFS over floor), then mount the switch on that wall
+            ey, ex_ = ex[0]
+            seen, q, target = {(ey, ex_)}, [(ey, ex_)], None
+            occupied = {(y, x) for y, x, _, _ in out}
+            for cy, cx in q:
+                if (cy, cx) != (ey, ex_) and (cy, cx) not in occupied and switch_side(g, cy, cx) is not None:
+                    target = (cy, cx)
+                    break
+                for ny, nx in ((cy + 1, cx), (cy - 1, cx), (cy, cx + 1), (cy, cx - 1)):
+                    if 0 <= ny < len(g) and 0 <= nx < len(g[ny]) and (ny, nx) not in seen and g[ny][nx] == ".":
+                        seen.add((ny, nx))
+                        q.append((ny, nx))
+            if target is not None:
+                g[ey][ex_] = "."
+                g[target[0]][target[1]] = "X"
+    return ["".join(r) for r in g], out
+
+
+def _generate(family: str, d: float, seed: int):
     """Return (grid rows as strings, things list [(x, y, type, angle)])."""
     rng = random.Random(seed)
     if family == "tiny":
@@ -249,7 +317,11 @@ def to_udmf(grid: list[str], things) -> str:
                 b = cell_val(ny, nx)
                 if b == "#":
                     mid = "DOORTRAK" if a in "DRBY" else "STARTAN2"
-                    lines.append(f"linedef {{ v1 = {v(*p1)}; v2 = {v(*p2)}; sidefront = {side(sid[y][x], mid)}; blocking = true; dontpegbottom = true; }}")
+                    special = ""
+                    if a == "X" and switch_side(grid, y, x) == (ny - y, nx - x):  # wall exit switch
+                        mid, special = SWITCH_TEX, "special = 243; playeruse = true;"
+                    extra = f" {special}" if special else ""
+                    lines.append(f"linedef {{ v1 = {v(*p1)}; v2 = {v(*p2)}; sidefront = {side(sid[y][x], mid)}; blocking = true; dontpegbottom = true;{extra} }}")
                     continue
                 sa, sb = sid[y][x], sid[ny][nx]
                 if sa == sb:
@@ -263,7 +335,7 @@ def to_udmf(grid: list[str], things) -> str:
                     top = "BIGDOOR2"
                 elif b == "E" and a != "E":
                     special, top = "special = 243; playercross = true;", "-"
-                elif a in "DRBYE" or (b == "." and a == "." and sa > sb):
+                elif a in "DRBYEX" or (b == "." and a == "." and sa > sb):
                     continue  # emitted from the other side
                 else:
                     top = "-"

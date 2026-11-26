@@ -19,6 +19,9 @@ from features import Features
 from model import Net, heads_to_buttons, load_compat, sample
 
 KEYS_LONG = ("etype", "crop_idx", "pos_idx")
+# Sampling temperature: logits / TEMP before sampling (1.0 = the trained distribution; < 1 sharper).
+# Argmax (TEMP -> 0) was clearly worse (6 vs 13 of 50 maps: stuck against walls).
+TEMP = 1.0
 
 
 class DecisionEngine:
@@ -43,7 +46,7 @@ class DecisionEngine:
         o = {k: torch.as_tensor(np.asarray(v)[None]).to(self.dev) for k, v in f.items()}
         o = {k: (v.long() if k in KEYS_LONG else v.float()) for k, v in o.items()}
         logits, _, _, self.state = self.net.step(o, self.state)
-        idx, _, _ = sampler(logits)
+        idx, _, _ = sampler(logits / TEMP if TEMP != 1.0 else logits)
         a = heads_to_buttons(idx)[0].cpu().numpy().astype(np.int64)
         if mask_backward:
             a = mask_actions(a, observation)

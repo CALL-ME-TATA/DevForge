@@ -17,7 +17,12 @@ RAY_RANGE, NUM_RAYS = 1024.0, 64
 KEY_T, ENEMY_T = 9, (1, 2, 3)
 PICKUP_T = (5, 6, 7, 8, 9)  # health, armor, ammo, weapon, key (doom_env.spaces.ENTITY_TYPES)
 N_KEYMEM = 2  # [any key held, steps since last key pickup / 200]: "backtrack to the gate" mode
-VEC_DIM = 17 + 9 + 40 + N_KEYMEM
+# Landmark compass (goal vector, Wijmans et al. 2020 / MERLIN "right information in the right format"):
+# for the nearest REMEMBERED locked door (M[3]) and key (M[4]) on the agent's own map:
+# [known, forward component, right component, distance / 2048]. Straight-line bearing, no path search.
+LANDMARK_CH = (3, 4)
+N_LANDMARK = 4 * len(LANDMARK_CH)
+VEC_DIM = 17 + 9 + 40 + N_KEYMEM + N_LANDMARK
 # Coarse global map: 16 x 16 heading-aligned cells of 512 units (= 8 x 8 fine cells), max-pooled, centred
 # on the agent, so remembered keys / locked doors beyond the 32 x 32 crop (> 1024 units) stay visible.
 GMAP, GCELL, GSUB = 16, 512.0, 4
@@ -63,6 +68,20 @@ class Features:
         self.prev_vel = np.zeros(2, np.float32)
         self.prev_action = np.zeros(9, np.float32)
         self.first = True
+
+    def _landmark(self, ch: int, h: float):
+        """Bearing to the nearest remembered cell of channel `ch`, in the heading frame."""
+        idx = np.flatnonzero(self.map[ch, :PAD] > 0.5)
+        if idx.size == 0:
+            return [0.0, 0.0, 0.0, 0.0]
+        dx = ((idx % G) - G // 2 + 0.5) * CELL - self.x
+        dy = ((idx // G) - G // 2 + 0.5) * CELL - self.y
+        d2 = dx * dx + dy * dy
+        k = int(np.argmin(d2))
+        dist = max(float(np.sqrt(d2[k])), 1.0)
+        fwd = (dx[k] * np.cos(h) + dy[k] * np.sin(h)) / dist
+        right = (dx[k] * np.sin(h) - dy[k] * np.cos(h)) / dist
+        return [1.0, float(fwd), float(right), min(dist / 2048.0, 2.0)]
 
     def _cell(self, wx, wy):
         cx = np.floor(np.asarray(wx) / CELL).astype(np.int64) + G // 2
@@ -178,7 +197,8 @@ class Features:
 
         depth = np.asarray(obs["depth"], np.float32)[30:90].min(0).reshape(40, 4).min(1) / 255.0
         keymem = np.array([float(kh > 0), min(self.since_key / 200.0, 5.0)], np.float32)
-        vec = np.concatenate([vit / VITALS_SCALE, self.prev_action, depth, keymem]).astype(np.float32)
+        landmarks = np.array([v for c in LANDMARK_CH for v in self._landmark(c, self.h)], np.float32)
+        vec = np.concatenate([vit / VITALS_SCALE, self.prev_action, depth, keymem, landmarks]).astype(np.float32)
         rays = np.concatenate([(dist / RAY_RANGE)[None], np.eye(6, dtype=np.float32)[ht].T]).astype(np.float32)
         ents = np.concatenate([np.clip(feat, -10, 10) * np.array([1, 1, 1, 0.1, 0.1], np.float32),
                                mask[:, None].astype(np.float32)], 1)
