@@ -71,11 +71,14 @@ def cur_to_plain(p):
 
 
 # reward / map-pool settings (CLI flags in main(); defaults = original behaviour)
+# Defaults follow the mentor review (per-action discipline + pathfinder shaping); every value is also a
+# CLI flag. Rewards only change learning when the PPO term is on (--ppo-w > 0); pure DAgger ignores them.
 DEFAULT_CFG = dict(maps_per_bin=40, dmg_pen=0.01, death_pen=3.0, cell_rew=0.01,
-                   shape_k=0.0, hard_floor=0.05, key_gate=0.5, weapon_pen=0.0, shot_pen=0.0, door_use=0.0,
+                   shape_k=0.15, hard_floor=0.05, key_gate=0.5, weapon_pen=0.05, shot_pen=0.02, door_use=0.5,
                    rev_p=0.0, assist=0.0, assist_until=0.6, edge_p=0.0, edge_every=32, edge_dir="",
-                   back_pen=0.0, turn_pen=0.0, use_bounce=0.02, hit_rew=0.0, aim_k=0.0, mask_back=0,
-                   dagger=0, dagger_beta=0.0, dagger_fade=0.5)
+                   back_pen=0.0, turn_pen=0.002, use_bounce=0.12, hit_rew=0.1, aim_k=0.0, mask_back=1,
+                   dagger=0, dagger_beta=0.0, dagger_fade=0.5,
+                   key_rew=3.5, stall_pen=0.01, stall_after=48)
 
 KEY_IDX = {"B": 0, "Y": 1, "R": 2}  # lock colour -> doom_env KEY_NAMES index (Blue/Yellow/Red card)
 KEY_THING_COLOUR = {13: "R", 5: "B", 6: "Y"}  # mapgen KEY_THING inverse
@@ -497,6 +500,7 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
                  hits=env._game.get_game_variable(vd.GameVariable.HITCOUNT))
         # DAgger teacher for this episode (generated maps only; Freedoom has no layout -> no labels)
         S["teacher"] = Teacher(S["shaper"], track_executed=True) if cfg["dagger"] and S.get("shaper") is not None else None
+        S["last_prog"] = 0
         f["priv"] = priv_of(ps)
         return f, ps
 
@@ -622,15 +626,17 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
         r += add("damage", -cfg["dmg_pen"] * max(0.0, p1["damage_taken"] - p0["damage_taken"]))
         dkeys = float(p1["keys"].sum() - p0["keys"].sum())
         if S["rev"] is None or S["t"] > 3:  # reverse-curriculum starts hand over passed keys for free
-            r += add("key", 3.0 * dkeys)
+            r += add("key", cfg["key_rew"] * dkeys)
         # pickups: ItemCount only counts special items, so health / armor / ammo come from the vitals
         picked = int(vit1[0] > vit[0]) + int(vit1[1] > vit[1]) + int(vit1[4:8].sum() > vit[4:8].sum())
         r += add("item", 0.2 * (picked + max(0, p1["items"] - p0["items"])))
         lock, fl, ce = p1["door_lock"], p1["sector_floor"], p1["sector_ceiling"]
+        door_opened = False
         for s in np.nonzero((lock >= 0) & (ce - fl > 40))[0]:
             if s not in S["opened"]:
                 S["opened"].add(s)
-                r += add("door", 1.0 + 2.0 * (lock[s] > 0))
+                door_opened = True
+                r += add("door", 1.0 + 2.0 * (lock[s] > 0))  # locked gate: +3.0 in total
         cell = (int(p1["x"] // 64), int(p1["y"] // 64))
         if dkeys > 0:
             # new key phase: re-arm the exploration bonus so backtracking to the locked door pays again
@@ -639,6 +645,11 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
         if not visited_before:
             S["visited"].add(cell)
             r += add("explore", cfg["cell_rew"])
+        # stagnation: no new cell / key / door / kill for `stall_after` steps costs a little per step
+        if (not visited_before) or dkeys > 0 or door_opened or p1["kills"] > p0["kills"]:
+            S["last_prog"] = S["t"]
+        elif cfg["stall_pen"] > 0 and S["t"] - S.get("last_prog", 0) > cfg["stall_after"]:
+            r += add("stall", -cfg["stall_pen"])
         if a[7] and not S["use_prev"]:
             if S["t"] - S["last_use"] < 8:
                 r += add("use", -cfg["use_bounce"])  # re-pressing USE bounces a moving door
@@ -760,7 +771,7 @@ class Envs:
 
 
 # ------------------------------------------------------------------ helpers
-KEYS = ("vec", "rays", "ents", "etype", "map", "crop_idx", "pos_idx", "wmask", "priv")  # priv: critic only
+KEYS = ("vec", "rays", "ents", "etype", "map", "gmap", "crop_idx", "pos_idx", "wmask", "priv")  # priv: critic only
 
 
 def stack(fs):
@@ -895,6 +906,12 @@ def main():
                     help="DAgger / learning-by-cheating: weight of the cross-entropy loss toward the privileged "
                          "teacher's action (training/teacher.py); 0 = off")
     ap.add_argument("--ppo-w", type=float, default=1.0, help="weight of the PPO policy+value+entropy terms (0 = pure imitation)")
+    ap.add_argument("--key-rew", type=float, default=DEFAULT_CFG["key_rew"], help="reward per key picked up")
+    ap.add_argument("--stall-pen", type=float, default=DEFAULT_CFG["stall_pen"],
+                    help="per-step penalty after --stall-after steps without a new cell/key/door/kill")
+    ap.add_argument("--stall-after", type=int, default=DEFAULT_CFG["stall_after"])
+    ap.add_argument("--bc-end", type=float, default=-1.0,
+                    help="DAPG-style: imitation weight decays linearly from --bc-w to this by the end (-1 = constant)")
     ap.add_argument("--dagger-fade", type=float, default=0.5,
                     help="fraction of the run over which --dagger-beta fades to 0; 0 = keep it constant")
     ap.add_argument("--dagger-beta", type=float, default=0.0,
@@ -942,7 +959,8 @@ def main():
                edge_p=args.edge_p, edge_every=args.edge_every, edge_dir=str(Path(args.out) / "edge_cases"),
                back_pen=args.back_pen, turn_pen=args.turn_pen, use_bounce=args.use_bounce,
                hit_rew=args.hit_rew, aim_k=args.aim_k, mask_back=args.mask_back,
-               dagger=int(args.bc_w > 0), dagger_beta=args.dagger_beta, dagger_fade=args.dagger_fade)
+               dagger=int(args.bc_w > 0), dagger_beta=args.dagger_beta, dagger_fade=args.dagger_fade,
+               key_rew=args.key_rew, stall_pen=args.stall_pen, stall_after=args.stall_after)
     print(f"config {cfg}", flush=True)
     if not Path(args.maps, f"gauntlet_4_{args.maps_per_bin - 1}.wad").exists():
         print("generating maps ...", flush=True)
@@ -1109,7 +1127,8 @@ def main():
                 loss = args.ppo_w * (pg + vl - ent_coef * en.mean()) + 0.1 * al
                 if args.bc_w > 0:
                     bc = bc_num / max(float(bc_den), 1.0)
-                    loss = loss + args.bc_w * bc
+                    bcw = args.bc_w if args.bc_end < 0 else args.bc_w + (args.bc_end - args.bc_w) * frac
+                    loss = loss + bcw * bc
                     stats["bc"].append(float(bc))
                     stats["agree"].append(agree_num / max(float(bc_den), 1.0))
                 opt.zero_grad(set_to_none=True)

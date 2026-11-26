@@ -15,7 +15,14 @@ N_FIXED = 9  # free, wall, door, locked, key, item, enemy, visits, recent (decay
 RECENT_DECAY = 0.97  # trail half-life ~23 steps
 RAY_RANGE, NUM_RAYS = 1024.0, 64
 KEY_T, ENEMY_T = 9, (1, 2, 3)
-VEC_DIM = 17 + 9 + 40
+PICKUP_T = (5, 6, 7, 8, 9)  # health, armor, ammo, weapon, key (doom_env.spaces.ENTITY_TYPES)
+N_KEYMEM = 2  # [any key held, steps since last key pickup / 200]: "backtrack to the gate" mode
+VEC_DIM = 17 + 9 + 40 + N_KEYMEM
+# Coarse global map: 16 x 16 heading-aligned cells of 512 units (= 8 x 8 fine cells), max-pooled, centred
+# on the agent, so remembered keys / locked doors beyond the 32 x 32 crop (> 1024 units) stay visible.
+GMAP, GCELL, GSUB = 16, 512.0, 4
+FRONT_RAYS = np.r_[0:8, 56:64]  # +-45 deg cone in front (ray 0 = straight ahead, CCW)
+CLEAR_FAR = 384.0  # free space seen this close in the front cone holds no phantom key/item marker
 VITALS_SCALE = np.array([100, 100, 7, 50, 200, 50, 50, 300, 1, 1, 1, 1, 1, 1, 10, 10, 10], np.float32)
 
 # mean heading change (deg) for (turn[t-2], turn[t-1], turn[t]); turn = left - right
@@ -33,6 +40,13 @@ _ci, _cj = np.meshgrid(np.arange(CROP), np.arange(CROP), indexing="ij")
 _FWD = ((CROP / 2 - 0.5) - _ci).ravel() * CELL  # crop row 0 = far ahead
 _RIGHT = (_cj - (CROP / 2 - 0.5)).ravel() * CELL
 PAD = G * G  # index of an always-empty cell
+# global-map sample points: GSUB x GSUB per coarse cell, same orientation as the crop (row 0 = far ahead)
+_gi, _gj = np.meshgrid(np.arange(GMAP), np.arange(GMAP), indexing="ij")
+_gsub = (np.arange(GSUB) + 0.5) / GSUB
+_GFWD = np.broadcast_to(((GMAP / 2 - 1 - _gi)[..., None, None] + _gsub[None, None, :, None]) * GCELL,
+                        (GMAP, GMAP, GSUB, GSUB)).ravel()
+_GRIGHT = np.broadcast_to(((_gj - GMAP / 2)[..., None, None] + _gsub[None, None, None, :]) * GCELL,
+                          (GMAP, GMAP, GSUB, GSUB)).ravel()
 
 
 class Features:
@@ -45,6 +59,7 @@ class Features:
         self.turns = [0, 0]
         self.n = 0  # integrated steps since reset
         self.keys_held = 0.0
+        self.since_key = 0  # steps since the last key pickup (counts only once a key is held)
         self.prev_vel = np.zeros(2, np.float32)
         self.prev_action = np.zeros(9, np.float32)
         self.first = True
@@ -104,15 +119,23 @@ class Features:
         M[3, nidx] = 0
         # rays stop at pickups, so open space seen up close holds no key/item any more (picked up)
         M[4:6, nidx] = 0
+        # phantom key/item markers: a pickup spotted at 200-500 units and never approached head-on used to
+        # stay on the map forever. If no pickup is in view, free space in the front cone up to CLEAR_FAR
+        # clears them too (locked doors M[3] keep the close-range-only rule above).
+        ent = obs["visible_entities"]
+        et = np.asarray(ent["entity_type"], np.int64)
+        mask = np.asarray(ent["mask"], bool)
+        if not np.isin(et[mask], PICKUP_T).any():
+            cone = np.zeros_like(free)
+            cone[FRONT_RAYS] = True
+            far = free & cone & (_SAMPLES[None, :] < CLEAR_FAR)
+            M[4:6, self._cell(fx[far], fy[far])] = 0
         hit = ht > 0
         hidx = self._cell(self.x + dx[hit] * (dist[hit] + 8), self.y + dy[hit] * (dist[hit] + 8))
         chan = np.array([0, 1, 2, 3, 6, 5])[ht[hit]]
         M[chan, hidx] = 1
         # visible keys / enemies from entity list (rotation by heading, no angle inversion)
-        ent = obs["visible_entities"]
         feat = np.asarray(ent["features"], np.float32)
-        et = np.asarray(ent["entity_type"], np.int64)
-        mask = np.asarray(ent["mask"], bool)
         d = feat[:, 0] * RAY_RANGE
         ex = self.x + d * (ch * feat[:, 2] - sh * feat[:, 1])
         ey = self.y + d * (sh * feat[:, 2] + ch * feat[:, 1])
@@ -128,6 +151,13 @@ class Features:
                 for ox in (-1, 0, 1):
                     if 0 <= cx + ox < G and 0 <= cy + oy < G:
                         M[4, (cy + oy) * G + cx + ox] = 0
+            # backtrack mode: earlier rooms are no longer "done" (visits reset) so the way back to the
+            # remembered locked door is open again; the recent trail M[8] stays, so the agent does not
+            # ping-pong straight back into the dead end it just left
+            M[7] = 0
+            self.since_key = 0
+        elif kh > 0:
+            self.since_key += 1
         self.keys_held = kh
         new_cell = pidx != PAD and M[7, pidx] == 0
         M[7, pidx] += 1
@@ -141,13 +171,20 @@ class Features:
         crop = M[:, crop_idx].reshape(N_FIXED, CROP, CROP).copy()
         crop[7] = np.log1p(crop[7]) / 3.0
 
+        # coarse global map (max-pooled, heading-aligned, agent-centred)
+        gidx = self._cell(self.x + _GFWD * ch + _GRIGHT * sh, self.y + _GFWD * sh - _GRIGHT * ch)
+        gmap = M[:, gidx].reshape(N_FIXED, GMAP * GMAP, GSUB * GSUB).max(-1).reshape(N_FIXED, GMAP, GMAP)
+        gmap[7] = np.log1p(gmap[7]) / 3.0
+
         depth = np.asarray(obs["depth"], np.float32)[30:90].min(0).reshape(40, 4).min(1) / 255.0
-        vec = np.concatenate([vit / VITALS_SCALE, self.prev_action, depth]).astype(np.float32)
+        keymem = np.array([float(kh > 0), min(self.since_key / 200.0, 5.0)], np.float32)
+        vec = np.concatenate([vit / VITALS_SCALE, self.prev_action, depth, keymem]).astype(np.float32)
         rays = np.concatenate([(dist / RAY_RANGE)[None], np.eye(6, dtype=np.float32)[ht].T]).astype(np.float32)
         ents = np.concatenate([np.clip(feat, -10, 10) * np.array([1, 1, 1, 0.1, 0.1], np.float32),
                                mask[:, None].astype(np.float32)], 1)
         out = {"vec": vec, "rays": rays, "ents": ents.astype(np.float32), "etype": et * mask,
-               "map": crop.astype(np.float16), "crop_idx": crop_idx, "pos_idx": np.int64(pidx),
+               "map": crop.astype(np.float16), "gmap": gmap.astype(np.float16),
+               "crop_idx": crop_idx, "pos_idx": np.int64(pidx),
                # action mask (allowed by RULES.md): no weapon switch while the held weapon has ammo
                "wmask": np.float32(0.0 if vit[3] > 0 else 1.0)}
         return out, bool(new_cell)
