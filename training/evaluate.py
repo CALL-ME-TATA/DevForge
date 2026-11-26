@@ -133,6 +133,7 @@ def main():
     ap.add_argument("--seed-start", type=int, default=5000, help="first map index (training uses 0..499)")
     ap.add_argument("--greedy", action="store_true", help="argmax actions instead of sampling")
     ap.add_argument("--temp", type=float, default=1.0, help="sampling temperature (decision.TEMP)")
+    ap.add_argument("--ep-seed", type=int, default=12345, help="episode seed base (vary to measure seed variance)")
     ap.add_argument("--mask", type=int, default=0, help="1 = backward mask on (checkpoints trained with --mask-back 1)")
     ap.add_argument("--freedoom-start", type=int, default=1,
                     help="first Freedoom level; training samples MAP01-24, so MAP25-32 are truly unseen")
@@ -147,7 +148,7 @@ def main():
         from doom_env.wrapper import IWAD
         maps += [("freedoom", IWAD, f"MAP{i:02d}", FAMILY_TICKS["freedoom"])
                  for i in range(args.freedoom_start, args.freedoom_start + args.freedoom)]
-    jobs = [(c, m, 12345 + j, args.greedy, args.mask, args.temp) for c in args.ckpts for j, m in enumerate(maps)]
+    jobs = [(c, m, args.ep_seed + j, args.greedy, args.mask, args.temp) for c in args.ckpts for j, m in enumerate(maps)]
     print(f"{len(maps)} held-out maps x {len(args.ckpts)} checkpoints = {len(jobs)} episodes, "
           f"{args.workers} workers", flush=True)
 

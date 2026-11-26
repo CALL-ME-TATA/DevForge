@@ -24,6 +24,7 @@ FAMILY_TICKS = {"tiny": 1050, "arena": 2100, "multi": 3150, "key": 4200, "gauntl
 LEVELS = 5
 EPISODES_PER_MAP = 8  # default for --eps-per-map
 FRESH_SEED_BASE = 10_000_000  # --fresh-p maps: never collides with pool seeds (< 4.1e6) or eval seeds
+REPLAY_CAP = 50  # failed-level replay buffer size per worker
 
 
 # ------------------------------------------------------------------ curriculum (per worker)
@@ -80,7 +81,7 @@ DEFAULT_CFG = dict(maps_per_bin=40, dmg_pen=0.01, death_pen=3.0, cell_rew=0.01,
                    back_pen=0.0, turn_pen=0.002, use_bounce=0.12, hit_rew=0.1, aim_k=0.0, mask_back=1,
                    dagger=0, dagger_beta=0.0, dagger_fade=0.5,
                    key_rew=3.5, stall_pen=0.01, stall_after=48, teacher_explore=0,
-                   fresh_p=0.0, eps_per_map=EPISODES_PER_MAP, extended=0)
+                   fresh_p=0.0, eps_per_map=EPISODES_PER_MAP, extended=0, replay_p=0.0)
 
 KEY_IDX = {"B": 0, "Y": 1, "R": 2}  # lock colour -> doom_env KEY_NAMES index (Blue/Yellow/Red card)
 KEY_THING_COLOUR = {13: "R", 5: "B", 6: "Y"}  # mapgen KEY_THING inverse
@@ -383,6 +384,7 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
     prog = [0.0]  # fraction of the run done (sent by the learner), drives the fading combat assist
     var_wad = os.path.join(tempfile.gettempdir(), f"doomvar_{wid}_{os.getpid()}.wad")
     fresh_wad = os.path.join(tempfile.gettempdir(), f"doomfresh_{wid}_{os.getpid()}.wad")
+    replay_buf = []  # (family, level, seed) of fresh levels the student failed
 
     def priv_of(ps):
         """Privileged critic input (training only): distance/goal from the generator layout + state."""
@@ -466,10 +468,18 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
                 if cfg["fresh_p"] > 0 and rng.random() < cfg["fresh_p"]:
                     # unlimited levels (Cobbe et al. 2019/2020): a brand-new layout for this load. Seeds start
                     # at FRESH_SEED_BASE, far above every pool seed (< 4.1e6) and held-out eval/test seed.
-                    seed = FRESH_SEED_BASE + rng.randrange(1 << 40)
+                    if replay_buf and rng.random() < cfg["replay_p"]:
+                        # Robust PLR / ACCEL (Jiang et al. 2021; Parker-Holder et al. 2022): revisit a fresh
+                        # level the student failed, until it is solved
+                        fam, li, seed = replay_buf[rng.randrange(len(replay_buf))]
+                        b = (fam, li)
+                    else:
+                        seed = FRESH_SEED_BASE + rng.randrange(1 << 40)
+                    S["fresh_seed"] = (fam, li, seed)
                     grid, things = generate(fam, li / (LEVELS - 1), seed, extended=bool(cfg["extended"]))
                     wad, mp_ = write_map(fresh_wad, grid, things), "MAP01"
                 else:
+                    S["fresh_seed"] = None
                     mi = rng.randrange(cfg["maps_per_bin"])
                     wad, mp_ = os.path.join(map_dir, f"{fam}_{li}_{mi}.wad"), "MAP01"
                     # rebuild this map's layout from its generator seed (same as build_pool)
@@ -718,6 +728,14 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
                 pass
             elif S["rev"] is None:  # only full-start episodes move the level curriculum
                 cur.update(S["bin"], info["exit_reached"])
+                fs = S.get("fresh_seed")
+                if fs is not None and cfg["replay_p"] > 0:  # failed fresh levels go to the replay buffer
+                    if info["exit_reached"]:
+                        if fs in replay_buf:
+                            replay_buf.remove(fs)
+                    elif fs not in replay_buf:
+                        replay_buf.append(fs)
+                        del replay_buf[:-REPLAY_CAP]
             else:
                 rev.update(S["bin"][0], S["rev"], info["exit_reached"])
             edge = mine_case(p1, info) if mine and rp is None else None
@@ -923,6 +941,8 @@ def main():
     ap.add_argument("--eps-per-map", type=int, default=DEFAULT_CFG["eps_per_map"],
                     help="episodes replayed per loaded map (loading costs ~0.4 s)")
     ap.add_argument("--wd", type=float, default=0.0, help="L2 weight decay (Cobbe et al. 2019: best regulariser)")
+    ap.add_argument("--replay-p", type=float, default=DEFAULT_CFG["replay_p"],
+                    help="probability a fresh-map load replays a previously failed fresh level (Robust PLR / ACCEL)")
     ap.add_argument("--extended", type=int, default=DEFAULT_CFG["extended"],
                     help="fresh maps use extended content: high-DPS monsters, more weapons/ammo, exit wall switches")
     ap.add_argument("--teacher-explore", type=int, default=DEFAULT_CFG["teacher_explore"],
@@ -982,7 +1002,7 @@ def main():
                dagger=int(args.bc_w > 0), dagger_beta=args.dagger_beta, dagger_fade=args.dagger_fade,
                key_rew=args.key_rew, stall_pen=args.stall_pen, stall_after=args.stall_after,
                teacher_explore=args.teacher_explore, fresh_p=args.fresh_p, eps_per_map=args.eps_per_map,
-               extended=args.extended)
+               extended=args.extended, replay_p=args.replay_p)
     print(f"config {cfg}", flush=True)
     if not Path(args.maps, f"gauntlet_4_{args.maps_per_bin - 1}.wad").exists():
         print("generating maps ...", flush=True)
