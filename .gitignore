@@ -222,3 +222,8 @@ _vizdoom.ini
 
 # Local validator / scorer artifacts
 *.lmp
+
+# training artifacts
+training/maps_gen/
+training/ckpt/
+*.log
