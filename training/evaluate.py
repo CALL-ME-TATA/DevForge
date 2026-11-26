@@ -44,7 +44,7 @@ def build_eval_maps(out_dir: Path, per_bin: int, levels: list[int], start: int =
 
 
 def run_one(job):
-    ckpt, (tag, wad, mapname, ticks), seed, greedy = job
+    ckpt, (tag, wad, mapname, ticks), seed, greedy, mask = job
     os.environ["OMP_NUM_THREADS"] = "1"
     import numpy as np
     import torch
@@ -52,6 +52,7 @@ def run_one(job):
     from doom_env import make_env
     import agent as agent_mod
     from agent import DoomAgent
+    agent_mod.MASK_BACKWARD = bool(mask)  # evaluate each checkpoint the way it was trained
     if greedy:  # always take each head's most likely action instead of sampling
         import functools
         import model
@@ -129,6 +130,7 @@ def main():
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--seed-start", type=int, default=5000, help="first map index (training uses 0..499)")
     ap.add_argument("--greedy", action="store_true", help="argmax actions instead of sampling")
+    ap.add_argument("--mask", type=int, default=0, help="1 = backward mask on (checkpoints trained with --mask-back 1)")
     ap.add_argument("--maps-dir", default=str(ROOT / "training" / "maps_eval"))
     ap.add_argument("--out", default=str(ROOT / "training" / "eval_results.json"))
     ap.add_argument("--families", nargs="+", default=None,
@@ -139,7 +141,7 @@ def main():
     if args.freedoom:
         from doom_env.wrapper import IWAD
         maps += [("freedoom", IWAD, f"MAP{i:02d}", FAMILY_TICKS["freedoom"]) for i in range(1, args.freedoom + 1)]
-    jobs = [(c, m, 12345 + j, args.greedy) for c in args.ckpts for j, m in enumerate(maps)]
+    jobs = [(c, m, 12345 + j, args.greedy, args.mask) for c in args.ckpts for j, m in enumerate(maps)]
     print(f"{len(maps)} held-out maps x {len(args.ckpts)} checkpoints = {len(jobs)} episodes, "
           f"{args.workers} workers", flush=True)
 

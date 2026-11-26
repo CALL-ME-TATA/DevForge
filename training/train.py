@@ -74,7 +74,8 @@ def cur_to_plain(p):
 DEFAULT_CFG = dict(maps_per_bin=40, dmg_pen=0.01, death_pen=3.0, cell_rew=0.01,
                    shape_k=0.0, hard_floor=0.05, key_gate=0.5, weapon_pen=0.0, shot_pen=0.0, door_use=0.0,
                    rev_p=0.0, assist=0.0, assist_until=0.6, edge_p=0.0, edge_every=32, edge_dir="",
-                   back_pen=0.0, turn_pen=0.0, use_bounce=0.02, hit_rew=0.0, aim_k=0.0, mask_back=0)
+                   back_pen=0.0, turn_pen=0.0, use_bounce=0.02, hit_rew=0.0, aim_k=0.0, mask_back=0,
+                   dagger=0, dagger_beta=0.0)
 
 KEY_IDX = {"B": 0, "Y": 1, "R": 2}  # lock colour -> doom_env KEY_NAMES index (Blue/Yellow/Red card)
 KEY_THING_COLOUR = {13: "R", 5: "B", 6: "Y"}  # mapgen KEY_THING inverse
@@ -366,6 +367,7 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
     from doom_env.wrapper import IWAD
     from features import Features
     from action_mask import mask_actions
+    from teacher import Teacher, idx_to_buttons
 
     import tempfile
     from mapgen import FAMILIES, generate, write_map
@@ -493,6 +495,8 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
                  used_doors=used, last_use=-99, last_sw=-99, t=0, ret=0.0, use_prev=0, phi=None, goal=None,
                  shaped=0.0, obs=obs, terms=defaultdict(float), trace=[], snaps=[],
                  hits=env._game.get_game_variable(vd.GameVariable.HITCOUNT))
+        # DAgger teacher for this episode (generated maps only; Freedoom has no layout -> no labels)
+        S["teacher"] = Teacher(S["shaper"], track_executed=True) if cfg["dagger"] and S.get("shaper") is not None else None
         f["priv"] = priv_of(ps)
         return f, ps
 
@@ -545,8 +549,19 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
             return
         gstep[0] += 1
         obs_prev = S["obs"]  # what the agent saw when it chose `a`
+        # ---- DAgger label: what the privileged teacher would do in the STUDENT's current situation
+        lab = np.full(7, -1, np.int64)  # 6 head indices + valid flag
+        if S.get("teacher") is not None:
+            tidx, tvalid = S["teacher"].act(obs_prev, S["ps"])
+            if tvalid:
+                lab[:6], lab[6] = tidx, 1
+                beta = cfg["dagger_beta"] * max(0.0, 1.0 - prog[0] / 0.5)  # mixing fades out by mid-run
+                if beta > 0 and rng.random() < beta:
+                    a = idx_to_buttons(tidx)  # execute the teacher's action (DAgger beta-mixture)
         if cfg["mask_back"]:  # same observation-based action mask as submission/agent.py
             a = mask_actions(a, obs_prev)
+        if S.get("teacher") is not None:
+            S["teacher"].note_executed(a)
         if S.pop("pending_end", False):
             obs, term, trunc, info = finish_now()
         else:
@@ -703,7 +718,7 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
                 if env._game.is_episode_finished():
                     S["pending_end"] = True
             f_next["priv"] = priv_of(p1)
-        conn.send((f_next, r, done, aux, ep))
+        conn.send((f_next, r, done, aux, ep, lab))
 
 
 class Envs:
@@ -875,6 +890,12 @@ def main():
                     help="penalty per shot fired with no enemy in view")
     ap.add_argument("--door-use", type=float, default=DEFAULT_CFG["door_use"],
                     help="reward for the first USE press next to each closed door (generated maps)")
+    ap.add_argument("--bc-w", type=float, default=0.0,
+                    help="DAgger / learning-by-cheating: weight of the cross-entropy loss toward the privileged "
+                         "teacher's action (training/teacher.py); 0 = off")
+    ap.add_argument("--ppo-w", type=float, default=1.0, help="weight of the PPO policy+value+entropy terms (0 = pure imitation)")
+    ap.add_argument("--dagger-beta", type=float, default=0.0,
+                    help="probability of executing the teacher's action instead of the student's (fades to 0 by mid-run)")
     ap.add_argument("--mask-back", type=int, default=DEFAULT_CFG["mask_back"],
                     help="1 = apply submission/action_mask.py (MOVE_BACKWARD only with an enemy in view), "
                          "exactly as the submitted agent does")
@@ -906,7 +927,7 @@ def main():
         args.ent_end = args.ent
 
     import torch
-    from model import Net, heads_to_buttons, load_compat, sample, evaluate
+    from model import Net, heads_to_buttons, load_compat, sample, evaluate, split_logits
     from mapgen import build_pool
 
     torch.manual_seed(args.seed)
@@ -917,7 +938,8 @@ def main():
                rev_p=args.rev_p, assist=args.assist, assist_until=args.assist_until,
                edge_p=args.edge_p, edge_every=args.edge_every, edge_dir=str(Path(args.out) / "edge_cases"),
                back_pen=args.back_pen, turn_pen=args.turn_pen, use_bounce=args.use_bounce,
-               hit_rew=args.hit_rew, aim_k=args.aim_k, mask_back=args.mask_back)
+               hit_rew=args.hit_rew, aim_k=args.aim_k, mask_back=args.mask_back,
+               dagger=int(args.bc_w > 0), dagger_beta=args.dagger_beta)
     print(f"config {cfg}", flush=True)
     if not Path(args.maps, f"gauntlet_4_{args.maps_per_bin - 1}.wad").exists():
         print("generating maps ...", flush=True)
@@ -966,7 +988,7 @@ def main():
         n_eps0, mined_it, rep_it = len(eps_log), 0, []
         ent_coef = args.ent + (args.ent_end - args.ent) * frac
         buf = {k: [] for k in KEYS}
-        acts, logps, vals, rews, dones, auxs, strt = [], [], [], [], [], [], []
+        acts, logps, vals, rews, dones, auxs, strt, labs = [], [], [], [], [], [], [], []
         h0 = torch.empty(nch, N, net.gru.hidden_size)
         L0 = torch.empty(nch, N, *pol.L.shape[1:], dtype=torch.float16)
         net.eval()
@@ -989,6 +1011,7 @@ def main():
                 d = np.array([x[2] for x in res])
                 dones.append(d)
                 auxs.append(np.stack([x[3] for x in res]))
+                labs.append(np.stack([x[5] for x in res]))
                 eps_log += [x[4] for x in res if x[4] is not None]
                 obs = stack([x[0] for x in res])
                 starts = d
@@ -1021,7 +1044,7 @@ def main():
         ret = adv + vals
         aux_t = aux_targets(np.array(auxs), dones)
         data = {k: np.array(v) for k, v in buf.items()}  # (T,N,...)
-        acts, logps, strt = np.array(acts), np.array(logps), np.array(strt)
+        acts, logps, strt, labs = np.array(acts), np.array(logps), np.array(strt), np.array(labs)  # labs (T,N,7)
 
         # ---- PPO update over (chunk, env) sequences
         net.train()
@@ -1036,6 +1059,7 @@ def main():
                 L = L0[cs, ns].to(dev).float()
                 st = (h, L)
                 lp_l, ent_l, v_l, aux_l = [], [], [], []
+                bc_num = bc_den = agree_num = 0.0
                 for k in range(C):
                     ts = cs * C + k
                     sl = (ts, ns)
@@ -1044,6 +1068,17 @@ def main():
                     logits, v, aux, st = net.step(to_t(data, dev, sl), st)
                     lp, en = evaluate(logits, torch.from_numpy(acts[ts, ns]).to(dev))
                     lp_l.append(lp); ent_l.append(en); v_l.append(v); aux_l.append(aux)
+                    if args.bc_w > 0:  # DAgger: cross-entropy of every action head toward the teacher's label
+                        lab_k = torch.from_numpy(labs[ts, ns]).to(dev)
+                        valid = (lab_k[:, 6] == 1).float()
+                        heads = split_logits(logits)
+                        ce_k = sum(torch.nn.functional.cross_entropy(lg, lab_k[:, j].clamp(min=0), reduction="none")
+                                   for j, lg in enumerate(heads))
+                        bc_num = bc_num + (ce_k * valid).sum()
+                        bc_den = bc_den + valid.sum()
+                        with torch.no_grad():  # move + turn agreement with the teacher
+                            agree = ((heads[0].argmax(-1) == lab_k[:, 0]) & (heads[2].argmax(-1) == lab_k[:, 2])).float()
+                            agree_num += float((agree * valid).sum())
                 ts_all = (cs[None, :] * C + np.arange(C)[:, None])  # (C,B)
                 ns_all = np.broadcast_to(ns[None, :], ts_all.shape)
                 g = lambda x: torch.from_numpy(np.ascontiguousarray(x[ts_all, ns_all])).to(dev)
@@ -1068,7 +1103,12 @@ def main():
                 stats["aux_dist"].append(l_dist.item()); stats["aux_dir"].append(l_dir.item())
                 stats["aux_exit"].append(l_es.item())
                 al = al + al2
-                loss = pg + vl - ent_coef * en.mean() + 0.1 * al
+                loss = args.ppo_w * (pg + vl - ent_coef * en.mean()) + 0.1 * al
+                if args.bc_w > 0:
+                    bc = bc_num / max(float(bc_den), 1.0)
+                    loss = loss + args.bc_w * bc
+                    stats["bc"].append(float(bc))
+                    stats["agree"].append(agree_num / max(float(bc_den), 1.0))
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(net.parameters(), 0.5)

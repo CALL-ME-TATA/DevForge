@@ -13,8 +13,8 @@ from model import Net, heads_to_buttons, load_compat, sample  # noqa: E402
 
 KEYS_LONG = ("etype", "crop_idx", "pos_idx")
 # Observation-based backward mask (action_mask.py). Must match how the shipped weights were trained:
-# the current weights (it1660) were trained and evaluated without it.
-MASK_BACKWARD = False
+# the current weights (it2180, DAgger) were trained and evaluated with it (training --mask-back 1).
+MASK_BACKWARD = True
 
 
 class DoomAgent:

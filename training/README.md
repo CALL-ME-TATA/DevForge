@@ -141,8 +141,21 @@ reward bookkeeping are training-time scaffolding only; the agent observes nothin
 | 0.6M – 5.0M | Docker, 40 envs |
 | 5.0M – 8.1M | 200 maps per bin; damage −0.01 → −0.03, death −3 → −5, cell +0.01 → +0.02 |
 | 8.1M – 9.5M | 500 maps per bin; distance shaping; curriculum floor for multi/key/gauntlet |
-| 9.5M – end | edge-case fixes: weapon-switch and wasted-shot penalties, door USE reward |
-| last 2 h | fine-tune: lr 1.5e-4, entropy 0.005 |
+| 9.5M – 16.6M | edge-case fixes (weapon/shot/door), reverse curriculum, asymmetric critic, auxiliary goal heads |
+| 16.6M – 17.7M | backward mask (`--mask-back 1`, same as the agent) |
+| 17.7M – end | **DAgger from a privileged teacher, PPO weight 0** (below) |
+
+### Final stage: imitation from a privileged teacher (DAgger / learning by cheating)
+
+`teacher.py` is a scripted expert that exists **only during training**. It reads the generator's layout
+of the current map and the engine's true pose, follows the shortest route (needed key, then locked door,
+then exit), presses USE once per door (a second press reverses a moving door), aims and fires at
+visible enemies, and never reverses or spins. Alone it clears 81/90 held-out generated maps
+(`test_teacher.py`). The student (this network) drives itself; at every step it is trained with
+cross-entropy on all 6 action heads toward the teacher's action for the student's own situation
+(DAgger, Ross et al. 2011; Learning by Cheating, Chen et al. 2019; kickstarting, Schmitt et al. 2018).
+For the first half of the run the teacher's action is executed with a fading probability (≤ 0.3).
+Nothing from the teacher reaches `submission/`: the agent sees only the official observations.
 
 ## Evaluation on unseen maps (`evaluate.py`, `tier_report.py`)
 
@@ -152,14 +165,15 @@ evaluation tiers: T1 `arena`, T2 `multi`, T3 `key`, T4 `gauntlet` + Freedoom, pl
 
 Levels cleared on 92 unseen maps (levels 0/2/4 × 6 maps per family + 2 Freedoom):
 
-| Tier | Repo's original weights | 0.6M steps | 4.5M steps | 6.0M steps |
-| --- | --- | --- | --- | --- |
-| T0 Basics (18) | 6 | 7 | 8 | **11** |
-| T1 Combat (18) | 1 | 2 | **3** | 2 |
-| T2 Multi-room (18) | 1 | 0 | 1 | 1 |
-| T3 Keys (18) | 0 | 0 | 0 | 0 |
-| T4 Gauntlet (20) | 0 | 0 | 0 | 0 |
-| **Total (92)** | **8** | **9** | **12** | **14** |
+| Tier | Repo's original weights | 4.5M (PPO) | 14.4M (PPO) | 16.1M (PPO) | **21.4M (DAgger, shipped)** |
+| --- | --- | --- | --- | --- | --- |
+| T0 Basics (18) | 6 | 8 | 17 | 17 | 16 |
+| T1 Combat (18) | 1 | 3 | 12 | **16** | 13 |
+| T2 Multi-room (18) | 1 | 1 | 6 | 6 | **11** |
+| T3 Keys (18) | 0 | 0 | 4 | 4 | **13** |
+| T4 Gauntlet (20) | 0 | 0 | 1 | 2 | **8** |
+| **Total (92)** | **8** | **12** | **40** | **45** | **61 (66%)** |
+| Died | 37% | 33% | 45% | 30% | **12%** |
 
 The final checkpoint is chosen by this evaluation, not by recency. Sampled actions beat greedy
 (argmax) actions clearly (13 vs 6 of 50 maps; greedy gets stuck against walls), so the agent samples.

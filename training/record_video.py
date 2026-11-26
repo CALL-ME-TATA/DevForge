@@ -43,10 +43,13 @@ def main():
     ap.add_argument("--maps", nargs="+", default=["tiny_4_5000", "arena_2_5000", "multi_0_5000",
                                                     "key_0_5000", "gauntlet_0_5000"])
     ap.add_argument("--fps", type=int, default=18, help="game runs at 8.75 decisions/s; 18 fps = ~2x speed")
+    ap.add_argument("--mask", type=int, default=0, help="1 = backward mask on (checkpoints trained with --mask-back 1)")
     args = ap.parse_args()
 
     from doom_env import make_env
+    import agent as agent_mod
     from agent import DoomAgent
+    agent_mod.MASK_BACKWARD = bool(args.mask)
     from model import load_compat
 
     sd = torch.load(args.ckpt, map_location="cpu")
