@@ -30,6 +30,29 @@ TOUGH_MONSTERS = [(65, 1.0), (3005, 0.7), (69, 0.5), (58, 0.5), (3006, 0.5), (30
 EXTRA_ITEMS = [2002, 82, 2048, 2049, 2012, 2018]  # chaingun, super shotgun, bullet box, shell box, medikit, armor
 SWITCH_EXIT_P = 0.35  # share of extended maps whose exit is a wall switch (USE) instead of a floor pad
 SWITCH_TEX = "SW1STARG"
+# realism (Freedoom diagnosis: stuck on barrels/pillars, damage from liquids, guns running dry)
+OBSTACLES = [2035, 48, 2028, 30, 31, 32]  # barrel, tech column, floor lamp, tall/short green & red columns
+AMMO_ITEMS = (2007, 2008, 2048, 2049)  # clip, shells, bullet box, shell box
+SCARCE_P = 0.3  # share of extended maps with almost no ammo pickups
+HAZARD_P = 0.4  # share of extended maps with damaging floor patches ('H' cells)
+HAZARD_TEX, HAZARD_DMG = "NUKAGE1", 5  # 5 HP every 32 tics while standing in it
+
+
+def _route_cells(g, start, goals):
+    """Cells on shortest paths from start to each goal (4-connected, any non-wall cell passable)."""
+    prev, q = {start: None}, [start]
+    for cy, cx in q:
+        for ny, nx in ((cy + 1, cx), (cy - 1, cx), (cy, cx + 1), (cy, cx - 1)):
+            if 0 <= ny < len(g) and 0 <= nx < len(g[ny]) and g[ny][nx] != "#" and (ny, nx) not in prev:
+                prev[(ny, nx)] = (cy, cx)
+                q.append((ny, nx))
+    cells = set()
+    for gl in goals:
+        node = gl
+        while node is not None and node in prev:
+            cells.add(node)
+            node = prev[node]
+    return cells
 
 
 def switch_side(grid, y, x):
@@ -174,6 +197,37 @@ def _extend(family, d, seed, grid, things):
             if target is not None:
                 g[ey][ex_] = "."
                 g[target[0]][target[1]] = "X"
+    rng2 = random.Random(seed * 104723 + 17)  # own stream: older extended content is unchanged
+    # --- realism: ammo scarcity, obstacles, hazard floors (never on the route to keys / exit) ---
+    if rng2.random() < SCARCE_P:
+        ammo = [th for th in out if th[2] in AMMO_ITEMS]
+        keep = set(rng2.sample(range(len(ammo)), min(1, len(ammo))))
+        drop = {id(th) for i, th in enumerate(ammo) if i not in keep}
+        out = [th for th in out if id(th) not in drop]
+    start = next(((y, x) for y, x, t, _ in out if t == 1), None)
+    if start is not None:
+        goals = [(y, x) for y in range(len(g)) for x in range(len(g[y])) if g[y][x] in "EX"]
+        goals += [(y, x) for y, x, t, _ in out if t in (5, 6, 13)]
+        route = _route_cells(g, start, goals)
+        near_route = {(y + dy, x + dx) for y, x in route for dy in (-1, 0, 1) for dx in (-1, 0, 1)}
+        occupied = {(y, x) for y, x, _, _ in out}
+        spots = [(y, x) for y in range(len(g)) for x in range(len(g[y]))
+                 if g[y][x] == "." and (y, x) not in near_route and (y, x) not in occupied
+                 and all(g[y + dy][x + dx] not in "DRBY" for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                         if 0 <= y + dy < len(g) and 0 <= x + dx < len(g[y + dy]))]
+        rng2.shuffle(spots)
+        for _ in range(min(len(spots), round(1 + 4 * d))):  # obstacles off the route
+            p = spots.pop()
+            out.append((p[0], p[1], rng2.choice(OBSTACLES), 0))
+        if spots and rng2.random() < HAZARD_P:  # 1-3 hazard patches of up to 4 cells
+            for _ in range(rng2.randint(1, 3)):
+                if not spots:
+                    break
+                y, x = spots.pop()
+                for cy, cx in ((y, x), (y + 1, x), (y, x + 1), (y + 1, x + 1)):
+                    if (0 <= cy < len(g) and 0 <= cx < len(g[cy]) and g[cy][cx] == "." and (cy, cx) not in near_route
+                            and (cy, cx) not in occupied):
+                        g[cy][cx] = "H"
     return ["".join(r) for r in g], out
 
 
@@ -347,7 +401,7 @@ def to_udmf(grid: list[str], things) -> str:
                     top = "BIGDOOR2"
                 elif b == "E" and a != "E":
                     special, top = "special = 243; playercross = true;", "-"
-                elif a in "DRBYEX" or (b == "." and a == "." and sa > sb):
+                elif a in "DRBYEX" or (a == "H" and b != "H") or (b == a and a in ".H" and sa > sb):
                     continue  # emitted from the other side
                 else:
                     top = "-"
@@ -358,8 +412,9 @@ def to_udmf(grid: list[str], things) -> str:
     out += [f"vertex {{ x = {x:.1f}; y = {y:.1f}; }}" for x, y in verts]
     for ch in sectors:
         ceil = 0 if ch in "DRBY" else 128
-        floor_tex = "GATE3" if ch == "E" else "FLOOR0_1"
-        out.append(f'sector {{ texturefloor = "{floor_tex}"; textureceiling = "CEIL1_1"; heightfloor = 0; heightceiling = {ceil}; lightlevel = 192; }}')
+        floor_tex = "GATE3" if ch == "E" else (HAZARD_TEX if ch == "H" else "FLOOR0_1")
+        dmg = f" damageamount = {HAZARD_DMG}; damageinterval = 32;" if ch == "H" else ""
+        out.append(f'sector {{ texturefloor = "{floor_tex}"; textureceiling = "CEIL1_1"; heightfloor = 0; heightceiling = {ceil}; lightlevel = 192;{dmg} }}')
     out += sides + lines
     for cy, cx, t, ang in things:
         out.append(f"thing {{ x = {cx * CELL + 32:.1f}; y = {-cy * CELL - 32:.1f}; angle = {ang}; type = {t}; "

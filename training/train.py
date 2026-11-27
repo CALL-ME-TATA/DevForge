@@ -81,7 +81,8 @@ DEFAULT_CFG = dict(maps_per_bin=40, dmg_pen=0.01, death_pen=3.0, cell_rew=0.01,
                    back_pen=0.0, turn_pen=0.002, use_bounce=0.12, hit_rew=0.1, aim_k=0.0, mask_back=1,
                    dagger=0, dagger_beta=0.0, dagger_fade=0.5,
                    key_rew=3.5, stall_pen=0.01, stall_after=48, teacher_explore=0,
-                   fresh_p=0.0, eps_per_map=EPISODES_PER_MAP, extended=0, replay_p=0.0, empty_switch_rew=0.0)
+                   fresh_p=0.0, eps_per_map=EPISODES_PER_MAP, extended=0, replay_p=0.0, empty_switch_rew=0.0,
+                   miss_pen=0.0, miss_streak_pen=0.0, ammo_need_k=0.0)
 
 KEY_IDX = {"B": 0, "Y": 1, "R": 2}  # lock colour -> doom_env KEY_NAMES index (Blue/Yellow/Red card)
 KEY_THING_COLOUR = {13: "R", 5: "B", 6: "Y"}  # mapgen KEY_THING inverse
@@ -515,7 +516,7 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
             visited |= {tuple(c) for c in case["visited"]}
             used = {tuple(d) for d in case["used"]}
         S.update(bin=b, ps=ps, visited=visited, opened=opened0,
-                 used_doors=used, last_use=-99, last_sw=-99, t=0, ret=0.0, use_prev=0, phi=None, goal=None,
+                 used_doors=used, last_use=-99, last_sw=-99, t=0, ret=0.0, use_prev=0, phi=None, goal=None, miss_streak=0,
                  shaped=0.0, obs=obs, terms=defaultdict(float), trace=[], snaps=[],
                  hits=env._game.get_game_variable(vd.GameVariable.HITCOUNT))
         # DAgger teacher for this episode (generated maps only; Freedoom has no layout -> no labels)
@@ -628,6 +629,17 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
         hits = env._game.get_game_variable(vd.GameVariable.HITCOUNT)
         if cfg["hit_rew"] > 0:  # dense aiming signal: engine hit counter (never seen by the agent)
             r += add("hit", cfg["hit_rew"] * max(0.0, hits - S["hits"]))
+        if cfg["miss_pen"] > 0:
+            # shooting discipline (Freedoom diagnosis: 485 shots, 1% hit, at enemies behind bars / too far):
+            # a shot = ammo actually spent, or a punch with an empty weapon; a shot that registers no hit
+            # costs miss_pen plus a growing miss-streak term
+            spent = float(np.sum(vit[4:8]) - np.sum(vit1[4:8]))
+            shot = spent > 0 or (a[6] and vit[3] <= 0)
+            if hits > S["hits"]:
+                S["miss_streak"] = 0
+            elif shot:
+                S["miss_streak"] = S.get("miss_streak", 0) + 1
+                r += add("miss", -cfg["miss_pen"] - cfg["miss_streak_pen"] * min(S["miss_streak"], 10))
         S["hits"] = hits
         if cfg["aim_k"] > 0:
             # potential-based aim shaping: phi = -aim_k * (angle to the nearest visible enemy / 45 deg),
@@ -655,6 +667,10 @@ def worker(conn, wid: int, map_dir: str, seed: int, cur0=None, cfg=None):
         # pickups: ItemCount only counts special items, so health / armor / ammo come from the vitals
         picked = int(vit1[0] > vit[0]) + int(vit1[1] > vit[1]) + int(vit1[4:8].sum() > vit[4:8].sum())
         r += add("item", 0.2 * (picked + max(0, p1["items"] - p0["items"])))
+        if cfg["ammo_need_k"] > 0 and vit1[4:6].sum() > vit[4:6].sum():
+            # ammo pickups pay more the emptier the guns were (Freedoom: 471 steps with an empty weapon)
+            fullness = min(1.0, 0.5 * (vit[4] / 200.0 + vit[5] / 50.0))
+            r += add("ammo", cfg["ammo_need_k"] * (1.0 - fullness))
         lock, fl, ce = p1["door_lock"], p1["sector_floor"], p1["sector_ceiling"]
         door_opened = False
         for s in np.nonzero((lock >= 0) & (ce - fl > 40))[0]:
@@ -945,6 +961,12 @@ def main():
     ap.add_argument("--eps-per-map", type=int, default=DEFAULT_CFG["eps_per_map"],
                     help="episodes replayed per loaded map (loading costs ~0.4 s)")
     ap.add_argument("--wd", type=float, default=0.0, help="L2 weight decay (Cobbe et al. 2019: best regulariser)")
+    ap.add_argument("--miss-pen", type=float, default=DEFAULT_CFG["miss_pen"],
+                    help="cost of a shot (ammo spent or empty-handed punch) that registers no hit")
+    ap.add_argument("--miss-streak-pen", type=float, default=DEFAULT_CFG["miss_streak_pen"],
+                    help="extra cost per consecutive miss (capped at 10)")
+    ap.add_argument("--ammo-need-k", type=float, default=DEFAULT_CFG["ammo_need_k"],
+                    help="ammo pickup reward scaled by how empty bullets/shells were: k * (1 - fullness)")
     ap.add_argument("--empty-switch-rew", type=float, default=DEFAULT_CFG["empty_switch_rew"],
                     help="reward for switching weapon while the held one is empty and other ammo exists")
     ap.add_argument("--replay-p", type=float, default=DEFAULT_CFG["replay_p"],
@@ -1008,7 +1030,8 @@ def main():
                dagger=int(args.bc_w > 0), dagger_beta=args.dagger_beta, dagger_fade=args.dagger_fade,
                key_rew=args.key_rew, stall_pen=args.stall_pen, stall_after=args.stall_after,
                teacher_explore=args.teacher_explore, fresh_p=args.fresh_p, eps_per_map=args.eps_per_map,
-               extended=args.extended, replay_p=args.replay_p, empty_switch_rew=args.empty_switch_rew)
+               extended=args.extended, replay_p=args.replay_p, empty_switch_rew=args.empty_switch_rew,
+               miss_pen=args.miss_pen, miss_streak_pen=args.miss_streak_pen, ammo_need_k=args.ammo_need_k)
     print(f"config {cfg}", flush=True)
     if not Path(args.maps, f"gauntlet_4_{args.maps_per_bin - 1}.wad").exists():
         print("generating maps ...", flush=True)

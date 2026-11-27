@@ -172,8 +172,11 @@ class Features:
                         M[4, (cy + oy) * G + cx + ox] = 0
             # backtrack mode: earlier rooms are no longer "done" (visits reset) so the way back to the
             # remembered locked door is open again; the recent trail M[8] stays, so the agent does not
-            # ping-pong straight back into the dead end it just left
-            M[7] = 0
+            # ping-pong straight back into the dead end it just left. Only if a locked door IS remembered:
+            # otherwise (e.g. a two-lock chain, door not seen yet) the reset made searched rooms look new
+            # and the agent looped in them (key_4_9000: 15-30 distinct cells per 150 steps for 700 steps).
+            if M[3, :PAD].max() > 0.5:
+                M[7] = 0
             self.since_key = 0
         elif kh > 0:
             self.since_key += 1
