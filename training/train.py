@@ -307,6 +307,11 @@ class GoalShaper:
     """
 
     def __init__(self, grid, things):
+        # solid decorations (barrels, columns, lamps) block movement: route the shaper and teacher around them
+        from mapgen import OBSTACLES
+        solid = {(y, x) for y, x, t, _ in things if t in OBSTACLES}
+        if solid:
+            grid = ["".join("#" if (y, x) in solid else c for x, c in enumerate(row)) for y, row in enumerate(grid)]
         self.g = grid
         self.H, self.W = len(grid), max(len(r) for r in grid)
         self.exit = [(y, x) for y, row in enumerate(grid) for x, c in enumerate(row) if c in "EX"]  # X = switch

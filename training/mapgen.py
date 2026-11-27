@@ -33,6 +33,7 @@ SWITCH_TEX = "SW1STARG"
 # realism (Freedoom diagnosis: stuck on barrels/pillars, damage from liquids, guns running dry)
 OBSTACLES = [2035, 48, 2028, 30, 31, 32]  # barrel, tech column, floor lamp, tall/short green & red columns
 AMMO_ITEMS = (2007, 2008, 2048, 2049)  # clip, shells, bullet box, shell box
+REALISM_P = 0.5  # share of extended maps that get the realism block
 SCARCE_P = 0.3  # share of extended maps with almost no ammo pickups
 HAZARD_P = 0.4  # share of extended maps with damaging floor patches ('H' cells)
 HAZARD_TEX, HAZARD_DMG = "NUKAGE1", 5  # 5 HP every 32 tics while standing in it
@@ -199,6 +200,10 @@ def _extend(family, d, seed, grid, things):
                 g[target[0]][target[1]] = "X"
     rng2 = random.Random(seed * 104723 + 17)  # own stream: older extended content is unchanged
     # --- realism: ammo scarcity, obstacles, hazard floors (never on the route to keys / exit) ---
+    # Only on REALISM_P of maps: the rest rehearse the previous distribution, which prevents forgetting
+    # when fine-tuning (Rolnick et al. 2019; Wolczyk et al. 2024).
+    if rng2.random() >= REALISM_P:
+        return ["".join(r) for r in g], out
     if rng2.random() < SCARCE_P:
         ammo = [th for th in out if th[2] in AMMO_ITEMS]
         keep = set(rng2.sample(range(len(ammo)), min(1, len(ammo))))

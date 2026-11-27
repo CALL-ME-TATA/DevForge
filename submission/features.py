@@ -8,9 +8,12 @@
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 G, CELL, CROP = 128, 64.0, 32
+DOOR_RESET = os.environ.get("DF_DOOR_RESET", "0") == "1"  # experiment switch, off in the submission
 N_FIXED = 9  # free, wall, door, locked, key, item, enemy, visits, recent (decaying trail)
 RECENT_DECAY = 0.97  # trail half-life ~23 steps
 RAY_RANGE, NUM_RAYS = 1024.0, 64
@@ -68,6 +71,7 @@ class Features:
         self.prev_vel = np.zeros(2, np.float32)
         self.prev_action = np.zeros(9, np.float32)
         self.first = True
+        self.door_known = False
 
     def _landmark(self, ch: int, h: float):
         """Bearing to the nearest remembered cell of channel `ch`, in the heading frame."""
@@ -180,6 +184,12 @@ class Features:
             self.since_key = 0
         elif kh > 0:
             self.since_key += 1
+        # optional (off by default, DF_DOOR_RESET=1): key found BEFORE its locked door -> when the first locked
+        # door is mapped while a key is held, reset visits once so the way back is open (as at key pickup)
+        door_now = bool(M[3, :PAD].max() > 0.5)
+        if DOOR_RESET and door_now and not self.door_known and kh > 0 and not kh > self.keys_held:
+            M[7] = 0
+        self.door_known = door_now
         self.keys_held = kh
         new_cell = pidx != PAD and M[7, pidx] == 0
         M[7, pidx] += 1

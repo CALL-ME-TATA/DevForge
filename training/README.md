@@ -231,8 +231,34 @@ largest hand-made maps within budget.
 | Freedoom MAP25: 485 shots, ~5 hits, then empty gun and death | no cost for missing; ammo never scarce in the generator | miss / miss-streak penalty, ammo pickup reward scaled by need (`--miss-pen`, `--miss-streak-pen`, `--ammo-need-k`); 30% of extended maps nearly ammo-free |
 | Freedoom MAP01: stuck 115 steps, 63/75 damage with no enemy in view | no obstacles or damaging floors in the generator | barrels / columns / lamps and NUKAGE hazard patches (5 HP / 32 tics), placed off the key-exit route on their own RNG stream (older maps unchanged) |
 
-Not done in the time available: running the teacher on rasterised real Freedoom geometry, the step expected
-to matter most for hand-made levels.
+Also: the shaper / teacher grid now marks solid decorations as walls (the teacher was steering into
+barrels), and only half of the extended maps get the new realism so the rest rehearse the old distribution
+(forgetting during fine-tuning: Rolnick et al. 2019; Wołczyk et al. 2024). `training/wise_ft.py` averages
+old and fine-tuned weights (WiSE-FT, Wortsman et al. 2022).
+
+**Result: the fine-tunes did not beat it2734, so it2734 stays the submission.** Exits on the same 54 fixed
+never-seen maps (seeds 9000–9001, all tiers and levels, Freedoom MAP25–28):
+
+| Model | Total | T1 | T2 | T3 | T4 | Freedoom |
+|---|---|---|---|---|---|---|
+| it2734 (two runs: original / with the `features.py` fix) | 37 / 41 | 7 / 9 | 8 / 8 | 6 / 7 | 6 / 7 | 0 / 0 |
+| run 1 (all fixes, 146 iters) | 33 | 8 | 5 | 6 | 4 | 0 |
+| run 1 WiSE-FT 0.5 with it2734 | 34 | 8 | 6 | 6 | 4 | 0 |
+| run 3 snapshot (obstacle-aware teacher, rehearsal, smaller rewards) | 35 | 8 | 6 | 6 | 5 | 0 |
+
+The same 54 maps vary by about ±3 exits between runs of one model (sampled actions), but T2 dropped in every
+fine-tune (5–6 vs 8): obstacles and hazard floors change room navigation, and about 100 iterations is not
+enough to adapt. The `features.py` memory fix ships (no regression: 41/54).
+
+**Next steps for differently-built maps** (the real weakness: on another team member's own map set, exits
+fell to 60 / 20 / 0 / 0 % for T1–T4):
+1. Teacher on rasterised real WAD geometry (Freedoom MAP01–24, community maps), learning by cheating on
+   the target domain (Chen et al. 2019); hold out MAP25–32 and unseen community maps for testing.
+2. A far more varied generator: non-rectangular rooms, height changes, lifts, remote switches, keys off the
+   main path (Tobin 2017; Cobbe 2020; Justesen 2018).
+3. Regret-driven map editing toward the agent's failures (PAIRED, Dennis 2020; ACCEL, Parker-Holder 2022).
+4. Memory for big maps: the 128 × 128 EgoMap covers ±4,096 units from spawn, so larger maps fall off it and
+   the agent re-walks explored areas; plus an episodic novelty reward (Never Give Up, Badia et al. 2020).
 
 ## Evaluation on unseen maps (`evaluate.py`, `tier_report.py`)
 
