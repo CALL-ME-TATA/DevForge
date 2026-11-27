@@ -223,6 +223,17 @@ largest hand-made maps within budget.
 - **Imitation of a heuristic teacher.** Allowed as training scaffolding (see Rules compliance), but the
   final policy is not pure end-to-end RL; the pure-PPO checkpoint (16.1M steps) scored 45/92 vs 61/92.
 
+### Post-submission fixes (from a frame-by-frame review of it2734 videos)
+
+| Failure seen | Cause found | Fix |
+|---|---|---|
+| T3: loops in already-searched rooms after picking a key | EgoMap visit channel was wiped on every key pickup, so searched rooms looked new | keep visits unless a locked door is already mapped (`features.py`) |
+| Freedoom MAP25: 485 shots, ~5 hits, then empty gun and death | no cost for missing; ammo never scarce in the generator | miss / miss-streak penalty, ammo pickup reward scaled by need (`--miss-pen`, `--miss-streak-pen`, `--ammo-need-k`); 30% of extended maps nearly ammo-free |
+| Freedoom MAP01: stuck 115 steps, 63/75 damage with no enemy in view | no obstacles or damaging floors in the generator | barrels / columns / lamps and NUKAGE hazard patches (5 HP / 32 tics), placed off the key-exit route on their own RNG stream (older maps unchanged) |
+
+Not done in the time available: running the teacher on rasterised real Freedoom geometry, the step expected
+to matter most for hand-made levels.
+
 ## Evaluation on unseen maps (`evaluate.py`, `tier_report.py`)
 
 Held-out levels come from the same generator with seeds never used in training (index ≥ 5000; training

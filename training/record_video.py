@@ -16,9 +16,9 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 
-TICKS = {"tiny": 1050, "arena": 2100, "multi": 3150, "key": 4200, "gauntlet": 4200}
+TICKS = {"tiny": 1050, "arena": 2100, "multi": 3150, "key": 4200, "gauntlet": 4200, "freedoom": 4200}
 TIER = {"tiny": "T0 Basics", "arena": "T1 Combat", "multi": "T2 Multi-room", "key": "T3 Keycards",
-        "gauntlet": "T4 Gauntlet"}
+        "gauntlet": "T4 Gauntlet", "freedoom": "Hand-made (Freedoom)"}
 SCALE, BAR = 4, 56
 
 
@@ -56,8 +56,12 @@ def main():
     it = sd.get("iter", "?")
     writer = imageio.get_writer(args.out, fps=args.fps, codec="libx264", quality=8, macro_block_size=8)
     for name in args.maps:
-        fam = name.split("_")[0]
-        env = make_env(str(ROOT / "training" / "maps_eval" / f"{name}.wad"), "MAP01", episode_ticks=TICKS[fam])
+        if name.startswith("freedoom:"):  # hand-made level from the game's own IWAD, e.g. freedoom:MAP25
+            from doom_env.wrapper import IWAD
+            fam, wad, mapname = "freedoom", IWAD, name.split(":")[1]
+        else:
+            fam, wad, mapname = name.split("_")[0], str(ROOT / "training" / "maps_eval" / f"{name}.wad"), "MAP01"
+        env = make_env(wad, mapname, episode_ticks=TICKS[fam])
         agent = DoomAgent(env.observation_space, env.action_space, "cpu")
         load_compat(agent.net, sd["model"])
         agent.reset()
