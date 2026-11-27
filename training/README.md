@@ -245,6 +245,14 @@ never-seen maps (seeds 9000–9001, all tiers and levels, Freedoom MAP25–28):
 | run 1 (all fixes, 146 iters) | 33 | 8 | 5 | 6 | 4 | 0 |
 | run 1 WiSE-FT 0.5 with it2734 | 34 | 8 | 6 | 6 | 4 | 0 |
 | run 3 snapshot (obstacle-aware teacher, rehearsal, smaller rewards) | 35 | 8 | 6 | 6 | 5 | 0 |
+| run 3 final (it ~2810) | 36 | 7 | 8 | 7 | 4 | 0 |
+| it2734, third run (other episode seed) | 39 | 9 | 9 | 7 | 5 | 0 |
+| it2734 + sampling temperature 0.85 | 34 | 5 | 8 | 6 | 5 | 0 |
+| it2734 + visit reset when the locked door is first seen with a key held | 39 | 9 | 8 | 7 | 5 | 0 |
+
+it2734 with the shipped code averages 40/54 over its three current runs. A sharper sampling temperature
+hurts combat (5/10, as greedy did earlier), and the door-time visit reset ties the baseline, so neither ships
+(both stay as off-by-default switches: `--temp`, `DF_DOOR_RESET=1`).
 
 The same 54 maps vary by about ±3 exits between runs of one model (sampled actions), but T2 dropped in every
 fine-tune (5–6 vs 8): obstacles and hazard floors change room navigation, and about 100 iterations is not
